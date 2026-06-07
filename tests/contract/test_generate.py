@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
-from tests.conftest import MockTransport
+from tests.conftest import MockTransport, make_seedream_response
 
 
 @pytest.mark.asyncio
@@ -68,6 +70,89 @@ async def test_generate_upstream_error(
     app.state.http_client = httpx.AsyncClient(transport=error_transport)
 
     resp = await client.post("/v1/generate", json={"prompt": "a sunset"})
+
+    assert resp.status_code == 502
+    data = resp.json()
+    assert data["error"] == "generation_failed"
+    assert "message" in data
+
+
+@pytest.mark.asyncio
+async def test_generate_seedream_success(client: httpx.AsyncClient, app):
+    """Seedream 路径：返回图片 URL，model 为 seedream 别名。"""
+    app.state.settings.ark_api_key = "test-ark-key"
+    app.state.http_client = httpx.AsyncClient(
+        transport=MockTransport(response_data=make_seedream_response())
+    )
+
+    resp = await client.post(
+        "/v1/generate",
+        json={"prompt": "a timeline infographic", "model": "doubao-seedream-4-0"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["model"] == "doubao-seedream-4-0"
+    assert data["cached"] is False
+    img_resp = await client.get(data["image_url"].replace("http://test", ""))
+    assert img_resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_generate_seedream_request_body(client: httpx.AsyncClient, app):
+    """Seedream 请求体含 watermark=false / b64_json / 鉴权头，且无 modalities。"""
+    app.state.settings.ark_api_key = "test-ark-key"
+    transport = MockTransport(response_data=make_seedream_response())
+    app.state.http_client = httpx.AsyncClient(transport=transport)
+
+    await client.post(
+        "/v1/generate",
+        json={"prompt": "x", "model": "doubao-seedream-4-0"},
+    )
+
+    assert str(transport.last_request.url).endswith("/images/generations")
+    assert transport.last_request.headers["authorization"] == "Bearer test-ark-key"
+    sent = json.loads(transport.last_request.content)
+    assert sent["watermark"] is False
+    assert sent["response_format"] == "b64_json"
+    assert sent["sequential_image_generation"] == "disabled"
+    assert sent["size"] == "2K"
+    assert sent["model"] == "doubao-seedream-4-0-250828"  # version-pinned wire id
+    assert "modalities" not in sent
+
+
+@pytest.mark.asyncio
+async def test_generate_seedream_missing_key(client: httpx.AsyncClient, app):
+    """未配置 ARK_API_KEY → 502 generation_failed。"""
+    app.state.settings.ark_api_key = ""
+    app.state.http_client = httpx.AsyncClient(
+        transport=MockTransport(response_data=make_seedream_response())
+    )
+
+    resp = await client.post(
+        "/v1/generate",
+        json={"prompt": "x", "model": "doubao-seedream-4-0"},
+    )
+
+    assert resp.status_code == 502
+    assert resp.json()["error"] == "generation_failed"
+
+
+@pytest.mark.asyncio
+async def test_generate_seedream_upstream_error(client: httpx.AsyncClient, app):
+    """Ark 非 200（如配额超限）→ 502 generation_failed。"""
+    app.state.settings.ark_api_key = "test-ark-key"
+    app.state.http_client = httpx.AsyncClient(
+        transport=MockTransport(
+            response_data={"error": {"message": "quota exceeded"}},
+            status_code=500,
+        )
+    )
+
+    resp = await client.post(
+        "/v1/generate",
+        json={"prompt": "x", "model": "doubao-seedream-4-0"},
+    )
 
     assert resp.status_code == 502
     data = resp.json()

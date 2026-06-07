@@ -134,6 +134,59 @@ async def call_gemini(
     raise GenerationError("No image content in LiteLLM Proxy response")
 
 
+async def call_seedream_images(
+    prompt: str,
+    model: str,
+    settings: Settings,
+    style: str | None = None,
+    http_client: httpx.AsyncClient | None = None,
+) -> tuple[bytes, str]:
+    """Call Volcengine Ark (OpenAI Images API) for Seedream; return (image_bytes, 'jpeg')."""
+    if not settings.ark_api_key:
+        raise GenerationError("ARK_API_KEY is not configured", status_code=502)
+
+    content = prompt
+    if style:
+        content = f"{prompt}, style: {style}"
+
+    payload = {
+        "model": settings.ark_model_id,
+        "prompt": content,
+        "size": "2K",
+        "response_format": "b64_json",
+        "sequential_image_generation": "disabled",
+        "watermark": False,
+    }
+
+    url = f"{settings.ark_base_url}/images/generations"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {settings.ark_api_key}",
+    }
+
+    resp = await _post_with_retries(
+        url, headers, payload, model=model, provider="ark", http_client=http_client
+    )
+
+    if resp.status_code != 200:
+        error_msg = "upstream error"
+        try:
+            error_data = resp.json()
+            error_msg = error_data.get("error", {}).get("message", error_msg)
+        except Exception:
+            pass
+        raise GenerationError(f"Ark error: {error_msg}")
+
+    data = resp.json()
+    items = data.get("data", [])
+    if items:
+        b64_data = items[0].get("b64_json")
+        if b64_data:
+            return base64.b64decode(b64_data), "jpeg"
+
+    raise GenerationError("No image content in Ark response")
+
+
 def save_image(image_bytes: bytes, cache_key: str, fmt: str, storage_dir: str) -> str:
     """Save image to disk and return the relative URL path."""
     filename = f"{cache_key}.{fmt}"
@@ -192,13 +245,22 @@ async def handle_generate(
 
     try:
         with GENERATION_DURATION.labels(model=model).time():
-            image_bytes, fmt = await call_gemini(
-                prompt=request.prompt,
-                model=model,
-                settings=settings,
-                style=request.style,
-                http_client=http_client,
-            )
+            if SUPPORTED_MODELS[model].endpoint_type == "images":
+                image_bytes, fmt = await call_seedream_images(
+                    prompt=request.prompt,
+                    model=model,
+                    settings=settings,
+                    style=request.style,
+                    http_client=http_client,
+                )
+            else:
+                image_bytes, fmt = await call_gemini(
+                    prompt=request.prompt,
+                    model=model,
+                    settings=settings,
+                    style=request.style,
+                    http_client=http_client,
+                )
 
         filename = save_image(image_bytes, cache_key, fmt, settings.storage_dir)
 

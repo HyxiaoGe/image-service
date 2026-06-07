@@ -41,6 +41,14 @@ def make_gemini_response(image_b64: str = FAKE_PNG_B64) -> dict:
     }
 
 
+def make_seedream_response(image_b64: str = FAKE_PNG_B64) -> dict:
+    """Build a fake Ark (OpenAI Images) response with a b64 image."""
+    return {
+        "data": [{"b64_json": image_b64}],
+        "model": "doubao-seedream-4-0-250828",
+    }
+
+
 class MockTransport(httpx.AsyncBaseTransport):
     """Mock httpx transport that returns canned Gemini responses."""
 
@@ -48,9 +56,11 @@ class MockTransport(httpx.AsyncBaseTransport):
         self._response_data = response_data or make_gemini_response()
         self._status_code = status_code
         self.call_count = 0
+        self.last_request: httpx.Request | None = None
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.call_count += 1
+        self.last_request = request
         return httpx.Response(
             status_code=self._status_code,
             json=self._response_data,
