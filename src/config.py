@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+EndpointType = Literal["chat", "images"]
+
 
 class ModelInfo:
-    def __init__(self, id: str, name: str, provider: str) -> None:
+    def __init__(self, id: str, name: str, provider: str, endpoint_type: EndpointType = "chat") -> None:
         self.id = id
         self.name = name
         self.provider = provider
+        self.endpoint_type = endpoint_type
 
 
 SUPPORTED_MODELS: dict[str, ModelInfo] = {
@@ -32,6 +37,12 @@ SUPPORTED_MODELS: dict[str, ModelInfo] = {
         name="Gemini 2.5 Flash Image",
         provider="Google",
     ),
+    "doubao-seedream-4-0": ModelInfo(
+        id="doubao-seedream-4-0",
+        name="Doubao Seedream 4.0",
+        provider="Volcano",
+        endpoint_type="images",
+    ),
 }
 
 
@@ -52,3 +63,12 @@ class Settings(BaseSettings):
     rate_limit_per_ip: int = 5
     rate_limit_window: int = 60
     cache_ttl_seconds: int = 604800  # 7 days
+    ark_api_key: str = Field("", description="Volcengine Ark API key (Seedream)")
+    ark_base_url: str = Field(
+        "https://ark.cn-beijing.volces.com/api/v3",
+        description="Ark OpenAI-compatible base URL",
+    )
+    ark_model_id: str = Field(
+        "doubao-seedream-4-0-250828",
+        description="Ark Seedream wire model id (version-pinned)",
+    )

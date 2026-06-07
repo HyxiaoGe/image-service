@@ -25,3 +25,4 @@ async def test_list_models(client: httpx.AsyncClient):
     assert "gemini-3-pro-image-preview" in ids
     assert "gemini-3.1-flash-image-preview" in ids
     assert "gemini-2.5-flash-image" in ids
+    assert "doubao-seedream-4-0" in ids
