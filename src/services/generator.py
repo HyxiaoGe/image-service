@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +36,61 @@ class GenerationError(Exception):
 
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 300.0  # 5 minutes — complex prompts can take a while
+
+# Seedream image-size constraints. 4.5 rejects any size below 3,686,400 px
+# ("image size must be at least 3686400 pixels"); 4.0 also accepts these
+# dimensions, so a single floor keeps the size logic model-agnostic. Sides are
+# aligned to 32px and clamped to Ark's [1024, 4096] per-side range.
+ARK_MIN_PIXELS = 3_686_400  # e.g. 2560x1440 (16:9), 1920x1920 (1:1)
+ARK_MIN_SIDE = 1024
+ARK_MAX_SIDE = 4096
+ARK_SIZE_ALIGN = 32
+
+
+def _parse_ratio(value: str | None) -> tuple[int, int] | None:
+    """Parse ``"W:H"`` or ``"WxH"`` into a positive ``(w, h)`` tuple, else None."""
+    if not value:
+        return None
+    m = re.fullmatch(r"(\d+)[:x](\d+)", value.strip())
+    if not m:
+        return None
+    w, h = int(m.group(1)), int(m.group(2))
+    if w <= 0 or h <= 0:
+        return None
+    return w, h
+
+
+def _ceil_align(value: float) -> int:
+    return int(math.ceil(value / ARK_SIZE_ALIGN) * ARK_SIZE_ALIGN)
+
+
+def _resolve_ark_size(aspect_ratio: str | None, size: str | None) -> str:
+    """Compute an explicit ``WxH`` Ark size that preserves the requested aspect
+    ratio and meets Seedream's minimum pixel budget.
+
+    Hardcoding a tier like ``"2K"`` lets Seedream pick the aspect ratio per
+    image, producing inconsistent landscape/portrait output. Passing explicit
+    dimensions locks the orientation the caller asked for. The aspect ratio is
+    preferred over ``size`` because callers may cap ``size`` (e.g. 2048/side).
+    """
+    aw, ah = _parse_ratio(aspect_ratio) or _parse_ratio(size) or (1, 1)
+    ratio = aw / ah
+    # Exact dims hitting the pixel floor, then round each side up to the 32px
+    # grid (rounding up only increases the count, so the floor still holds).
+    height = math.sqrt(ARK_MIN_PIXELS / ratio)
+    width = ratio * height
+    w = min(max(_ceil_align(width), ARK_MIN_SIDE), ARK_MAX_SIDE)
+    h = min(max(_ceil_align(height), ARK_MIN_SIDE), ARK_MAX_SIDE)
+    # Extreme ratios can clamp a side and dip back under the floor; bump the
+    # smaller side until the budget is met or both sides hit the ceiling.
+    while w * h < ARK_MIN_PIXELS:
+        if w <= h and w < ARK_MAX_SIDE:
+            w += ARK_SIZE_ALIGN
+        elif h < ARK_MAX_SIDE:
+            h += ARK_SIZE_ALIGN
+        else:
+            break
+    return f"{w}x{h}"
 
 
 async def _post_with_retries(
@@ -101,9 +158,7 @@ async def call_gemini(
         "Authorization": f"Bearer {settings.litellm_api_key}",
     }
 
-    resp = await _post_with_retries(
-        url, headers, payload, model=model, provider="litellm", http_client=http_client
-    )
+    resp = await _post_with_retries(url, headers, payload, model=model, provider="litellm", http_client=http_client)
 
     if resp.status_code != 200:
         error_msg = "upstream error"
@@ -140,6 +195,8 @@ async def call_seedream_images(
     settings: Settings,
     style: str | None = None,
     http_client: httpx.AsyncClient | None = None,
+    aspect_ratio: str | None = None,
+    size: str | None = None,
 ) -> tuple[bytes, str]:
     """Call Volcengine Ark (OpenAI Images API) for Seedream; return (image_bytes, 'jpeg')."""
     if not settings.ark_api_key:
@@ -152,7 +209,7 @@ async def call_seedream_images(
     payload = {
         "model": settings.ark_model_id,
         "prompt": content,
-        "size": "2K",
+        "size": _resolve_ark_size(aspect_ratio, size),
         "response_format": "b64_json",
         "sequential_image_generation": "disabled",
         "watermark": False,
@@ -164,9 +221,7 @@ async def call_seedream_images(
         "Authorization": f"Bearer {settings.ark_api_key}",
     }
 
-    resp = await _post_with_retries(
-        url, headers, payload, model=model, provider="ark", http_client=http_client
-    )
+    resp = await _post_with_retries(url, headers, payload, model=model, provider="ark", http_client=http_client)
 
     if resp.status_code != 200:
         error_msg = "upstream error"
@@ -252,6 +307,8 @@ async def handle_generate(
                     settings=settings,
                     style=request.style,
                     http_client=http_client,
+                    aspect_ratio=request.aspect_ratio,
+                    size=request.size,
                 )
             else:
                 image_bytes, fmt = await call_gemini(

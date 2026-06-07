@@ -45,7 +45,7 @@ def make_seedream_response(image_b64: str = FAKE_PNG_B64) -> dict:
     """Build a fake Ark (OpenAI Images) response with a b64 image."""
     return {
         "data": [{"b64_json": image_b64}],
-        "model": "doubao-seedream-4-0-250828",
+        "model": "doubao-seedream-4-5-251128",
     }
 
 

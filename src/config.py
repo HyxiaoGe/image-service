@@ -37,6 +37,12 @@ SUPPORTED_MODELS: dict[str, ModelInfo] = {
         name="Gemini 2.5 Flash Image",
         provider="Google",
     ),
+    "doubao-seedream-4-5": ModelInfo(
+        id="doubao-seedream-4-5",
+        name="Doubao Seedream 4.5",
+        provider="Volcano",
+        endpoint_type="images",
+    ),
     "doubao-seedream-4-0": ModelInfo(
         id="doubao-seedream-4-0",
         name="Doubao Seedream 4.0",
@@ -68,7 +74,10 @@ class Settings(BaseSettings):
         "https://ark.cn-beijing.volces.com/api/v3",
         description="Ark OpenAI-compatible base URL",
     )
+    # Version selector for the Seedream path: every Volcano alias in
+    # SUPPORTED_MODELS runs whichever wire id this pins. Bump this env to change
+    # the deployed Seedream version without touching code.
     ark_model_id: str = Field(
-        "doubao-seedream-4-0-250828",
+        "doubao-seedream-4-5-251128",
         description="Ark Seedream wire model id (version-pinned)",
     )
