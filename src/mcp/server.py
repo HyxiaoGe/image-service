@@ -30,11 +30,11 @@ async def generate_image(
     size: str = "1024x1024",
     style: str | None = None,
 ) -> str:
-    """Generate an image from a text prompt via OpenRouter.
+    """Generate an image from a text prompt via the image-service backend.
 
     Args:
         prompt: Text description of the image to generate.
-        model: OpenRouter model ID (optional, uses default if omitted).
+        model: Image model ID (optional, uses default if omitted). See list_models.
         aspect_ratio: Aspect ratio e.g. '16:9', '1:1'. Default '1:1'.
         size: Output dimensions as 'WxH'. Default '1024x1024'.
         style: Style hint e.g. 'watercolor', 'photorealistic' (optional).

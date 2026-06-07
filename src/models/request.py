@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=10000, description="Text prompt")
-    model: str | None = Field(None, description="OpenRouter model ID")
+    model: str | None = Field(None, description="Image model ID; see GET /v1/models. Uses default if omitted.")
     aspect_ratio: str = Field("1:1", description="Aspect ratio e.g. 16:9")
     size: str = Field("1024x1024", description="Dimensions as WxH")
     style: str | None = Field(None, description="Style hint e.g. watercolor")

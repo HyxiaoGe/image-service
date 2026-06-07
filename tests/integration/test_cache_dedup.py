@@ -27,5 +27,5 @@ async def test_cache_dedup_same_prompt(
     assert data2["cached"] is True
     assert data2["image_url"] == data1["image_url"]
 
-    # OpenRouter should have been called only once
+    # The upstream image API should have been called only once
     assert mock_transport.call_count == 1
