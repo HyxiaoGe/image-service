@@ -36,6 +36,47 @@ MAX_RETRIES = 2
 REQUEST_TIMEOUT = 300.0  # 5 minutes — complex prompts can take a while
 
 
+async def _post_with_retries(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, object],
+    model: str,
+    provider: str,
+    http_client: httpx.AsyncClient | None = None,
+) -> httpx.Response:
+    """POST with bounded retries on timeout/connect errors.
+
+    Returns the upstream response (caller checks status_code). Raises
+    GenerationError after exhausting retries.
+    """
+    resp = None
+    for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
+        logger.info("upstream_request", provider=provider, model=model, attempt=attempt)
+        try:
+            if http_client is not None:
+                resp = await http_client.post(url, headers=headers, json=payload)
+            else:
+                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+            break  # Success, exit retry loop
+        except httpx.TimeoutException:
+            logger.warning("upstream_timeout", provider=provider, model=model, attempt=attempt)
+            if attempt < MAX_RETRIES + 1:
+                await asyncio.sleep(2)
+                continue
+            raise GenerationError(
+                f"Upstream request timed out after {MAX_RETRIES + 1} attempts, please retry"
+            ) from None
+        except httpx.ConnectError:
+            logger.warning("upstream_connect_error", provider=provider, model=model, attempt=attempt)
+            if attempt < MAX_RETRIES + 1:
+                await asyncio.sleep(2)
+                continue
+            raise GenerationError(f"Cannot connect to {provider} after retries") from None
+    assert resp is not None  # loop always breaks with resp set or raises
+    return resp
+
+
 async def call_gemini(
     prompt: str,
     model: str,
@@ -43,7 +84,7 @@ async def call_gemini(
     style: str | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> tuple[bytes, str]:
-    """Call LiteLLM Proxy (OpenAI-compatible) and return (image_bytes, format_ext)."""
+    """Call LiteLLM Proxy (OpenAI-compatible chat+modalities) and return (image_bytes, format_ext)."""
     content = prompt
     if style:
         content = f"{prompt}, style: {style}"
@@ -60,30 +101,9 @@ async def call_gemini(
         "Authorization": f"Bearer {settings.litellm_api_key}",
     }
 
-    resp = None
-    for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
-        logger.info("gemini_request", model=model, attempt=attempt)
-        try:
-            if http_client is not None:
-                resp = await http_client.post(url, headers=headers, json=payload)
-            else:
-                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                    resp = await client.post(url, headers=headers, json=payload)
-            break  # Success, exit retry loop
-        except httpx.TimeoutException:
-            logger.warning("gemini_timeout", model=model, attempt=attempt)
-            if attempt < MAX_RETRIES + 1:
-                await asyncio.sleep(2)  # Brief pause before retry
-                continue
-            raise GenerationError(
-                f"Upstream request timed out after {MAX_RETRIES + 1} attempts, please retry"
-            ) from None
-        except httpx.ConnectError:
-            logger.warning("gemini_connect_error", model=model, attempt=attempt)
-            if attempt < MAX_RETRIES + 1:
-                await asyncio.sleep(2)
-                continue
-            raise GenerationError("Cannot connect to LiteLLM Proxy after retries") from None
+    resp = await _post_with_retries(
+        url, headers, payload, model=model, provider="litellm", http_client=http_client
+    )
 
     if resp.status_code != 200:
         error_msg = "upstream error"
@@ -105,7 +125,6 @@ async def call_gemini(
     for img in images:
         data_url = img.get("image_url", {}).get("url", "")
         if data_url.startswith("data:"):
-            # Parse "data:image/jpeg;base64,<data>"
             header, _, b64_data = data_url.partition(",")
             mime_type = header.split(";")[0].replace("data:", "")
             image_bytes = base64.b64decode(b64_data)
