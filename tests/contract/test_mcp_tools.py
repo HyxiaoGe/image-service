@@ -116,3 +116,15 @@ async def test_generate_image_unexpected_exception(app, monkeypatch):
     assert text.startswith("Error generating image [internal_error]: ")
     assert "secret" not in text
     assert result.structured_content["error"]["code"] == "internal_error"
+
+
+@pytest.mark.asyncio
+async def test_list_models_shows_aspect_ratios(app):
+    async with Client(app.state.mcp) as mcp_client:
+        result = await mcp_client.call_tool("list_models", {})
+
+    text = _text(result)
+    flash_line = next(line for line in text.splitlines() if "gemini-3.1-flash-image-preview" in line)
+    assert "1:8" in flash_line and "21:9" in flash_line
+    seedream_line = next(line for line in text.splitlines() if "doubao-seedream-4-5" in line)
+    assert "any" in seedream_line

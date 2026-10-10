@@ -213,7 +213,12 @@ def _status_error_code(status: int) -> ErrorCode:
 def _gemini_http_error(resp: httpx.Response) -> GenerationError:
     _, message = _upstream_error_fields(resp)
     status = resp.status_code
-    if status == 400 and "aspect_ratio must be one of" in message:
+    # 3.1 Flash says "aspect_ratio must be one of ..."; Pro / 2.5 say
+    # "Aspect ratio X is not supported for this model".
+    ratio_rejected = "aspect_ratio must be one of" in message or (
+        "Aspect ratio" in message and "is not supported for this model" in message
+    )
+    if status == 400 and ratio_rejected:
         return GenerationError(
             ErrorCode.INVALID_PARAMS,
             "aspect_ratio is not supported by this model.",
@@ -243,17 +248,25 @@ async def call_gemini(
     settings: Settings,
     style: str | None = None,
     http_client: httpx.AsyncClient | None = None,
+    aspect_ratio: str | None = None,
 ) -> tuple[bytes, str]:
     """Call LiteLLM Proxy (OpenAI-compatible chat+modalities) and return (image_bytes, format_ext)."""
     content = prompt
     if style:
         content = f"{prompt}, style: {style}"
 
-    payload = {
+    payload: dict[str, object] = {
         "model": f"gemini/{model}",
         "messages": [{"role": "user", "content": content}],
         "modalities": ["text", "image"],
+        # LiteLLM's response cache does not key on imageConfig and would hand back
+        # an image with the wrong ratio (or a stale one on regenerate). This
+        # service caches on the full parameter set itself, so skip LiteLLM's.
+        "cache": {"no-cache": True, "no-store": True},
     }
+    if aspect_ratio:
+        # LiteLLM forwards a top-level imageConfig to Gemini's generationConfig.
+        payload["imageConfig"] = {"aspectRatio": aspect_ratio}
 
     url = f"{settings.litellm_base_url}/v1/chat/completions"
     headers = {
@@ -428,6 +441,14 @@ async def _generate(
             fields=["model"],
         )
 
+    allowed = SUPPORTED_MODELS[model].aspect_ratios
+    if allowed is not None and request.aspect_ratio not in allowed:
+        raise GenerationError(
+            ErrorCode.INVALID_PARAMS,
+            f"aspect_ratio '{request.aspect_ratio}' is not supported by {model}. Supported: {', '.join(allowed)}.",
+            fields=["aspect_ratio"],
+        )
+
     cache_key = compute_cache_key(request.prompt, model, request.aspect_ratio, request.size, request.style)
 
     # Check cache
@@ -466,6 +487,7 @@ async def _generate(
                     settings=settings,
                     style=request.style,
                     http_client=http_client,
+                    aspect_ratio=request.aspect_ratio,
                 )
 
         filename = save_image(image_bytes, cache_key, fmt, settings.storage_dir)

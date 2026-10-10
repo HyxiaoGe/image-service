@@ -124,5 +124,6 @@ async def list_models() -> str:
     """List available image generation models."""
     lines = ["Available models:", ""]
     for i, model_info in enumerate(SUPPORTED_MODELS.values(), 1):
-        lines.append(f"{i}. {model_info.name} ({model_info.id}) — {model_info.provider}")
+        ratios = ", ".join(model_info.aspect_ratios) if model_info.aspect_ratios else "any W:H"
+        lines.append(f"{i}. {model_info.name} ({model_info.id}) — {model_info.provider} — aspect ratios: {ratios}")
     return "\n".join(lines)

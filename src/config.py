@@ -8,12 +8,28 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 EndpointType = Literal["chat", "images"]
 
 
+# Aspect ratios Gemini image models accept via imageConfig.aspectRatio, verified
+# against the live API on 2026-10-10 (unsupported ratios return HTTP 400).
+GEMINI_ASPECT_RATIOS: tuple[str, ...] = ("1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9")
+# 3.1 Flash additionally accepts the extreme ratios.
+GEMINI_FLASH_31_ASPECT_RATIOS: tuple[str, ...] = (*GEMINI_ASPECT_RATIOS, "1:4", "4:1", "1:8", "8:1")
+
+
 class ModelInfo:
-    def __init__(self, id: str, name: str, provider: str, endpoint_type: EndpointType = "chat") -> None:
+    def __init__(
+        self,
+        id: str,
+        name: str,
+        provider: str,
+        endpoint_type: EndpointType = "chat",
+        aspect_ratios: tuple[str, ...] | None = None,
+    ) -> None:
         self.id = id
         self.name = name
         self.provider = provider
         self.endpoint_type = endpoint_type
+        # None = any W:H ratio (Seedream maps it to explicit pixel dimensions).
+        self.aspect_ratios = aspect_ratios
 
 
 SUPPORTED_MODELS: dict[str, ModelInfo] = {
@@ -21,21 +37,25 @@ SUPPORTED_MODELS: dict[str, ModelInfo] = {
         id="nano-banana-pro-preview",
         name="Nano Banana Pro",
         provider="Google",
+        aspect_ratios=GEMINI_ASPECT_RATIOS,
     ),
     "gemini-3-pro-image-preview": ModelInfo(
         id="gemini-3-pro-image-preview",
         name="Gemini 3 Pro Image",
         provider="Google",
+        aspect_ratios=GEMINI_ASPECT_RATIOS,
     ),
     "gemini-3.1-flash-image-preview": ModelInfo(
         id="gemini-3.1-flash-image-preview",
         name="Gemini 3.1 Flash Image",
         provider="Google",
+        aspect_ratios=GEMINI_FLASH_31_ASPECT_RATIOS,
     ),
     "gemini-2.5-flash-image": ModelInfo(
         id="gemini-2.5-flash-image",
         name="Gemini 2.5 Flash Image",
         provider="Google",
+        aspect_ratios=GEMINI_ASPECT_RATIOS,
     ),
     "doubao-seedream-4-5": ModelInfo(
         id="doubao-seedream-4-5",

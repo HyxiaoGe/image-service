@@ -13,10 +13,16 @@ LOCK_POLL_INTERVAL = 0.5
 LOCK_MAX_WAIT = 60
 
 
+# Bump when cached images stop matching what the same parameters produce now.
+# v2 (2026-10-10): Gemini started honouring aspect_ratio; older entries are
+# landscape images stored under every ratio's key.
+CACHE_KEY_VERSION = "v2"
+
+
 def compute_cache_key(prompt: str, model: str, aspect_ratio: str, size: str, style: str | None = None) -> str:
     """Compute SHA-256 cache key from normalized generation parameters."""
     style_part = (style or "").strip().lower()
-    raw = f"{prompt.strip().lower()}:{model.lower()}:{aspect_ratio}:{size}:{style_part}"
+    raw = f"{CACHE_KEY_VERSION}:{prompt.strip().lower()}:{model.lower()}:{aspect_ratio}:{size}:{style_part}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 

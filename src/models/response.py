@@ -17,6 +17,7 @@ class ModelInfoResponse(BaseModel):
     id: str
     name: str
     provider: str
+    aspect_ratios: list[str] | None = None  # None = any W:H ratio
 
 
 class ModelsListResponse(BaseModel):
