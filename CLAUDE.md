@@ -41,4 +41,4 @@ Env vars loaded from `.env` (see `.env.example`). Key settings: `LITELLM_BASE_UR
 
 ## Deployment
 
-Docker Compose on dev server (192.168.1.10). CI runs ruff lint + architecture check before deploy. Port 8090.
+Docker Compose on the dev server (self-hosted runner). CI runs ruff lint + architecture check before deploy. Port 8090.
