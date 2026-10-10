@@ -8,11 +8,13 @@ from pathlib import Path
 import redis.asyncio as aioredis
 import structlog
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import generate_latest
 
+from src.api.generate import validation_exception_handler
 from src.api.router import v1_router
 from src.config import Settings
 from src.mcp.server import init_mcp, mcp
@@ -33,7 +35,7 @@ def configure_logging() -> None:
             structlog.processors.UnicodeDecoder(),
             structlog.dev.ConsoleRenderer()
             if os.getenv("ENV", "dev") == "dev"
-            else structlog.processors.JSONRenderer(),
+            else structlog.processors.JSONRenderer(ensure_ascii=False),
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
@@ -94,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def metrics() -> Response:
         return Response(content=generate_latest(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
     app.include_router(v1_router, prefix="/v1")
 
     # Mount MCP server

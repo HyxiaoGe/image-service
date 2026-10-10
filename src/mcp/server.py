@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import structlog
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from pydantic import ValidationError
 
 from src.config import SUPPORTED_MODELS, Settings
+from src.models.errors import ERROR_SPECS, ErrorCode, validation_error_fields
 from src.models.request import GenerateRequest
 from src.services.cache import CacheService
 from src.services.generator import GenerationError, handle_generate
+
+logger = structlog.get_logger()
 
 mcp = FastMCP("image-service")
 
@@ -22,6 +28,29 @@ def init_mcp(settings: Settings, cache: CacheService, http_client=None) -> None:
     _http_client = http_client
 
 
+def _error_result(
+    code: ErrorCode,
+    message: str | None = None,
+    *,
+    model: str | None = None,
+    fields: list[str] | None = None,
+) -> ToolResult:
+    """Failure result: text keeps the ``Error`` prefix callers already match on,
+    structured content carries the code. ``isError`` stays false so existing MCP
+    clients read the payload instead of treating it as a transport failure."""
+    spec = ERROR_SPECS[code]
+    message = message or spec.message
+    error: dict[str, object] = {"code": code.value, "message": message, "retryable": spec.retryable}
+    if model:
+        error["model"] = model
+    if fields:
+        error["fields"] = fields
+    return ToolResult(
+        content=f"Error generating image [{code.value}]: {message}",
+        structured_content={"ok": False, "error": error},
+    )
+
+
 @mcp.tool()
 async def generate_image(
     prompt: str,
@@ -29,7 +58,7 @@ async def generate_image(
     aspect_ratio: str = "1:1",
     size: str = "1024x1024",
     style: str | None = None,
-) -> str:
+) -> ToolResult:
     """Generate an image from a text prompt via the image-service backend.
 
     Args:
@@ -38,9 +67,12 @@ async def generate_image(
         aspect_ratio: Aspect ratio e.g. '16:9', '1:1'. Default '1:1'.
         size: Output dimensions as 'WxH'. Default '1024x1024'.
         style: Style hint e.g. 'watercolor', 'photorealistic' (optional).
+
+    On failure the text starts with "Error generating image [<code>]:" and the
+    structured content is {"ok": false, "error": {"code", "message", "retryable", ...}}.
     """
     if _settings is None or _cache is None:
-        return "Error: MCP server not initialized"
+        return _error_result(ErrorCode.CONFIG_MISSING, "MCP server not initialized")
 
     try:
         request = GenerateRequest(
@@ -50,19 +82,41 @@ async def generate_image(
             size=size,
             style=style,
         )
-        result = await handle_generate(request, _settings, _cache, http_client=_http_client)
+    except ValidationError as e:
+        errors = e.errors()
+        first = errors[0].get("msg") if errors else None
+        return _error_result(ErrorCode.INVALID_PARAMS, first, fields=validation_error_fields(errors))
 
-        full_url = f"{_settings.service_base_url}{result.image_url}"
-
-        lines = [
-            f"Generated image: {full_url}",
-            f"Model: {result.model}",
-            f"Cached: {result.cached}",
-            f"ID: {result.id}",
-        ]
-        return "\n".join(lines)
+    try:
+        result = await handle_generate(request, _settings, _cache, http_client=_http_client, entry="mcp")
     except GenerationError as e:
-        return f"Error generating image: {e.message}"
+        return _error_result(e.code, e.message, model=e.model, fields=e.fields)
+    except Exception:
+        # handle_generate already logged the traceback; never leak it to the caller.
+        return _error_result(ErrorCode.INTERNAL_ERROR)
+
+    full_url = f"{_settings.service_base_url}{result.image_url}"
+    # The first four lines are parsed by existing callers; only append new lines.
+    lines = [
+        f"Generated image: {full_url}",
+        f"Model: {result.model}",
+        f"Cached: {result.cached}",
+        f"ID: {result.id}",
+        f"Requested model: {result.requested_model}",
+        f"Fallback used: {result.fallback_used}",
+    ]
+    return ToolResult(
+        content="\n".join(lines),
+        structured_content={
+            "ok": True,
+            "image_url": full_url,
+            "model": result.model,
+            "requested_model": result.requested_model,
+            "fallback_used": result.fallback_used,
+            "cached": result.cached,
+            "id": result.id,
+        },
+    )
 
 
 @mcp.tool()

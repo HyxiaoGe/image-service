@@ -6,7 +6,9 @@ from pydantic import BaseModel
 class GenerateResponse(BaseModel):
     id: str
     image_url: str
-    model: str
+    model: str  # model that actually produced the image
+    requested_model: str  # model the caller asked for (or the default)
+    fallback_used: bool = False
     cached: bool
     created_at: str
 
@@ -33,6 +35,9 @@ class HealthResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    error: str
+    error: str  # an ErrorCode value for generation errors
     message: str
+    retryable: bool | None = None
+    model: str | None = None
+    fields: list[str] | None = None  # invalid_params: offending request fields
     retry_after: int | None = None

@@ -75,7 +75,7 @@ async def test_generate_upstream_error(
     client: httpx.AsyncClient,
     app,
 ):
-    """T016: Upstream 500 → 502 with ErrorResponse."""
+    """T016: Upstream 500 → 502 upstream_unavailable."""
     # Replace the http_client with one that returns errors
     error_transport = MockTransport(
         response_data={"error": {"message": "upstream error"}},
@@ -87,7 +87,8 @@ async def test_generate_upstream_error(
 
     assert resp.status_code == 502
     data = resp.json()
-    assert data["error"] == "generation_failed"
+    assert data["error"] == "upstream_unavailable"
+    assert data["retryable"] is True
     assert "message" in data
 
 
@@ -153,7 +154,7 @@ async def test_generate_seedream_explicit_landscape_size(client: httpx.AsyncClie
 
 @pytest.mark.asyncio
 async def test_generate_seedream_missing_key(client: httpx.AsyncClient, app):
-    """未配置 ARK_API_KEY → 502 generation_failed。"""
+    """未配置 ARK_API_KEY → 503 config_missing。"""
     app.state.settings.ark_api_key = ""
     app.state.http_client = httpx.AsyncClient(transport=MockTransport(response_data=make_seedream_response()))
 
@@ -162,13 +163,13 @@ async def test_generate_seedream_missing_key(client: httpx.AsyncClient, app):
         json={"prompt": "x", "model": "doubao-seedream-4-0"},
     )
 
-    assert resp.status_code == 502
-    assert resp.json()["error"] == "generation_failed"
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "config_missing"
 
 
 @pytest.mark.asyncio
 async def test_generate_seedream_upstream_error(client: httpx.AsyncClient, app):
-    """Ark 非 200（如配额超限）→ 502 generation_failed。"""
+    """Ark 5xx → 502 upstream_unavailable，上游原文不回给调用方。"""
     app.state.settings.ark_api_key = "test-ark-key"
     app.state.http_client = httpx.AsyncClient(
         transport=MockTransport(
@@ -184,5 +185,5 @@ async def test_generate_seedream_upstream_error(client: httpx.AsyncClient, app):
 
     assert resp.status_code == 502
     data = resp.json()
-    assert data["error"] == "generation_failed"
-    assert "message" in data
+    assert data["error"] == "upstream_unavailable"
+    assert "quota exceeded" not in data["message"]

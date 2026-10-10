@@ -25,8 +25,17 @@
 
 ## Error handling
 
-- `GenerationError` exception class for all upstream/generation failures
-- API endpoints catch errors and return `ErrorResponse` JSON with appropriate status codes
+- `GenerationError(code, ...)` for all generation failures; `code` is an `ErrorCode` from `src/models/errors.py`, whose `ERROR_SPECS` fixes the HTTP status, `retryable` flag and caller-facing message
+- Upstream wording goes in `upstream_detail` (logged, truncated to 500 chars), never in the message returned to callers
+- REST returns `ErrorResponse` with `error=<code>`; MCP returns text `Error generating image [<code>]: ...` plus `structured_content={"ok": false, "error": {...}}` with `isError` false
+- Request validation errors (REST and MCP) map to `invalid_params` with a `fields` list
+- MCP success text: keep the first four lines (`Generated image`, `Model`, `Cached`, `ID`) stable — callers parse them; only append new lines
+
+## Logging
+
+- `handle_generate` emits exactly one `generation_finished` event per request (outcome, error_code, duration_ms, attempts, ...)
+- Never log prompt text; log `prompt_len` and `prompt_sha8`
+- `ENV=production` (set in docker-compose) switches to JSON output for Loki
 - Middleware functions return `JSONResponse | None` (None = pass through)
 
 ## Dependencies

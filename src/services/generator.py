@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import math
 import re
+import time
 import uuid
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,6 +15,7 @@ import httpx
 import structlog
 
 from src.config import SUPPORTED_MODELS, Settings
+from src.models.errors import ERROR_SPECS, ErrorCode
 from src.models.request import GenerateRequest
 from src.models.response import GenerateResponse
 from src.services.cache import CacheService, compute_cache_key
@@ -26,16 +30,44 @@ logger = structlog.get_logger()
 
 
 class GenerationError(Exception):
-    """Raised when upstream image generation fails."""
+    """Raised when image generation fails; carries a caller-facing ErrorCode.
 
-    def __init__(self, message: str, status_code: int = 502):
-        self.message = message
-        self.status_code = status_code
-        super().__init__(message)
+    ``message`` defaults to the code's fixed text. ``upstream_detail`` holds the
+    raw upstream wording for logs only and is never returned to callers.
+    """
+
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str | None = None,
+        *,
+        model: str | None = None,
+        upstream_status: int | None = None,
+        upstream_detail: str | None = None,
+        fields: list[str] | None = None,
+    ):
+        spec = ERROR_SPECS[code]
+        self.code = code
+        self.message = message or spec.message
+        self.status_code = spec.http_status
+        self.retryable = spec.retryable
+        self.model = model
+        self.upstream_status = upstream_status
+        self.upstream_detail = upstream_detail[:500] if upstream_detail else None
+        self.fields = fields
+        super().__init__(self.message)
 
 
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 300.0  # 5 minutes — complex prompts can take a while
+
+# Upstream POST attempts (incl. retries) for the current request; read by the
+# summary log in handle_generate.
+_upstream_attempts: ContextVar[int] = ContextVar("upstream_attempts", default=0)
+
+# Markers Gemini uses for safety blocks (blockReason / finishReason values) when
+# they surface as an HTTP error instead of a 200 with finish_reason=content_filter.
+_GEMINI_SAFETY_MARKERS = ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST")
 
 # Seedream image-size constraints. 4.5 rejects any size below 3,686,400 px
 # ("image size must be at least 3686400 pixels"); 4.0 also accepts these
@@ -110,6 +142,7 @@ async def _post_with_retries(
     """
     resp = None
     for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
+        _upstream_attempts.set(_upstream_attempts.get() + 1)
         logger.info("upstream_request", provider=provider, model=model, attempt=attempt)
         try:
             if http_client is not None:
@@ -124,16 +157,84 @@ async def _post_with_retries(
                 await asyncio.sleep(2)
                 continue
             raise GenerationError(
-                f"Upstream request timed out after {MAX_RETRIES + 1} attempts, please retry"
+                ErrorCode.UPSTREAM_TIMEOUT,
+                upstream_detail=f"{provider} timed out after {MAX_RETRIES + 1} attempts",
             ) from None
         except httpx.ConnectError:
             logger.warning("upstream_connect_error", provider=provider, model=model, attempt=attempt)
             if attempt < MAX_RETRIES + 1:
                 await asyncio.sleep(2)
                 continue
-            raise GenerationError(f"Cannot connect to {provider} after retries") from None
+            raise GenerationError(
+                ErrorCode.UPSTREAM_UNAVAILABLE,
+                upstream_detail=f"cannot connect to {provider} after {MAX_RETRIES + 1} attempts",
+            ) from None
+        except httpx.TransportError as e:
+            # e.g. connection dropped mid-response: not retried, the upstream may
+            # already be generating (and billing) this request.
+            raise GenerationError(
+                ErrorCode.UPSTREAM_UNAVAILABLE,
+                upstream_detail=f"{provider} transport error: {type(e).__name__}",
+            ) from None
     assert resp is not None  # loop always breaks with resp set or raises
     return resp
+
+
+def _upstream_error_fields(resp: httpx.Response) -> tuple[str, str]:
+    """Best-effort ``(error.code, error.message)`` from an OpenAI-style error body."""
+    try:
+        err = resp.json().get("error")
+    except Exception:
+        err = None
+    if not isinstance(err, dict):
+        return "", resp.text[:500]
+    return str(err.get("code") or ""), str(err.get("message") or "")
+
+
+def _json_body(resp: httpx.Response, provider: str) -> dict:
+    """Parse a 200 body; a non-JSON or non-object body counts as "no image"."""
+    try:
+        data = resp.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise GenerationError(
+            ErrorCode.NO_IMAGE_RETURNED, upstream_detail=f"non-JSON {provider} body: {resp.text[:200]!r}"
+        )
+    return data
+
+
+def _status_error_code(status: int) -> ErrorCode:
+    if status == 429 or status >= 500:
+        return ErrorCode.UPSTREAM_UNAVAILABLE
+    return ErrorCode.UPSTREAM_ERROR
+
+
+def _gemini_http_error(resp: httpx.Response) -> GenerationError:
+    _, message = _upstream_error_fields(resp)
+    status = resp.status_code
+    if status == 400 and "aspect_ratio must be one of" in message:
+        return GenerationError(
+            ErrorCode.INVALID_PARAMS,
+            "aspect_ratio is not supported by this model.",
+            upstream_status=status,
+            upstream_detail=message,
+            fields=["aspect_ratio"],
+        )
+    if status in (400, 403) and any(marker in message for marker in _GEMINI_SAFETY_MARKERS):
+        code = ErrorCode.CONTENT_FILTERED
+    else:
+        code = _status_error_code(status)
+    return GenerationError(code, upstream_status=status, upstream_detail=message)
+
+
+def _ark_http_error(resp: httpx.Response) -> GenerationError:
+    # Ark reports moderation as error codes like InputTextSensitiveContentDetected /
+    # OutputImageSensitiveContentDetected (per Volcengine docs; not yet seen live).
+    ark_code, message = _upstream_error_fields(resp)
+    status = resp.status_code
+    code = ErrorCode.CONTENT_FILTERED if "SensitiveContent" in ark_code else _status_error_code(status)
+    return GenerationError(code, upstream_status=status, upstream_detail=f"{ark_code}: {message}".strip(": "))
 
 
 async def call_gemini(
@@ -163,21 +264,16 @@ async def call_gemini(
     resp = await _post_with_retries(url, headers, payload, model=model, provider="litellm", http_client=http_client)
 
     if resp.status_code != 200:
-        error_msg = "upstream error"
-        try:
-            error_data = resp.json()
-            error_msg = error_data.get("error", {}).get("message", error_msg)
-        except Exception:
-            pass
-        raise GenerationError(f"LiteLLM Proxy error: {error_msg}")
+        raise _gemini_http_error(resp)
 
-    data = resp.json()
-    choices = data.get("choices", [])
+    data = _json_body(resp, "litellm")
+    choices = data.get("choices") or []
     if not choices:
-        raise GenerationError("No choices returned from LiteLLM Proxy")
+        raise GenerationError(ErrorCode.NO_IMAGE_RETURNED, upstream_detail="no choices in LiteLLM response")
 
-    message = choices[0].get("message", {})
-    images = message.get("images", [])
+    finish_reason = choices[0].get("finish_reason")
+    message = choices[0].get("message") or {}
+    images = message.get("images") or []
 
     for img in images:
         data_url = img.get("image_url", {}).get("url", "")
@@ -188,7 +284,10 @@ async def call_gemini(
             fmt = mime_type.split("/")[-1] if "/" in mime_type else "png"
             return image_bytes, fmt
 
-    raise GenerationError("No image content in LiteLLM Proxy response")
+    detail = f"finish_reason={finish_reason} content={str(message.get('content') or '')[:300]!r}"
+    if finish_reason == "content_filter":
+        raise GenerationError(ErrorCode.CONTENT_FILTERED, upstream_detail=detail)
+    raise GenerationError(ErrorCode.NO_IMAGE_RETURNED, upstream_detail=detail)
 
 
 async def call_seedream_images(
@@ -202,7 +301,7 @@ async def call_seedream_images(
 ) -> tuple[bytes, str]:
     """Call Volcengine Ark (OpenAI Images API) for Seedream; return (image_bytes, 'jpeg')."""
     if not settings.ark_api_key:
-        raise GenerationError("ARK_API_KEY is not configured", status_code=502)
+        raise GenerationError(ErrorCode.CONFIG_MISSING, upstream_detail="ARK_API_KEY is not configured")
 
     content = prompt
     if style:
@@ -226,22 +325,16 @@ async def call_seedream_images(
     resp = await _post_with_retries(url, headers, payload, model=model, provider="ark", http_client=http_client)
 
     if resp.status_code != 200:
-        error_msg = "upstream error"
-        try:
-            error_data = resp.json()
-            error_msg = error_data.get("error", {}).get("message", error_msg)
-        except Exception:
-            pass
-        raise GenerationError(f"Ark error: {error_msg}")
+        raise _ark_http_error(resp)
 
-    data = resp.json()
+    data = _json_body(resp, "ark")
     items = data.get("data", [])
     if items:
         b64_data = items[0].get("b64_json")
         if b64_data:
             return base64.b64decode(b64_data), "jpeg"
 
-    raise GenerationError("No image content in Ark response")
+    raise GenerationError(ErrorCode.NO_IMAGE_RETURNED, upstream_detail="no b64_json in Ark response")
 
 
 def save_image(image_bytes: bytes, cache_key: str, fmt: str, storage_dir: str) -> str:
@@ -253,20 +346,86 @@ def save_image(image_bytes: bytes, cache_key: str, fmt: str, storage_dir: str) -
     return filename
 
 
+def _cached_response(cached: dict, requested_model: str) -> GenerateResponse:
+    return GenerateResponse(
+        id=cached["id"],
+        image_url=cached["image_url"],
+        model=cached["model"],
+        requested_model=requested_model,
+        cached=True,
+        created_at=cached["created_at"],
+    )
+
+
 async def handle_generate(
     request: GenerateRequest,
     settings: Settings,
     cache: CacheService,
     http_client: httpx.AsyncClient | None = None,
+    entry: str = "rest",
+) -> GenerateResponse:
+    """Generate (or fetch from cache) and emit one ``generation_finished`` summary log."""
+    started = time.perf_counter()
+    _upstream_attempts.set(0)
+    requested_model = request.model or settings.default_model
+    fields: dict[str, object] = {
+        "request_id": str(uuid.uuid4()),
+        "entry": entry,
+        "requested_model": requested_model,
+        "aspect_ratio": request.aspect_ratio,
+        "size": request.size,
+        "prompt_len": len(request.prompt),
+        "prompt_sha8": hashlib.sha256(request.prompt.encode()).hexdigest()[:8],
+    }
+
+    def finish(level: str, **extra: object) -> None:
+        getattr(logger, level)(
+            "generation_finished",
+            **fields,
+            **extra,
+            attempts=_upstream_attempts.get(),
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+
+    try:
+        result = await _generate(request, requested_model, settings, cache, http_client)
+    except GenerationError as e:
+        e.model = e.model or requested_model
+        finish(
+            "warning",
+            outcome="error",
+            model=e.model,
+            error_code=e.code.value,
+            upstream_status=e.upstream_status,
+            upstream_detail=e.upstream_detail,
+        )
+        raise
+    except Exception:
+        finish("exception", outcome="error", model=requested_model, error_code=ErrorCode.INTERNAL_ERROR.value)
+        raise
+    finish(
+        "info",
+        outcome="cached" if result.cached else "success",
+        model=result.model,
+        fallback_used=result.fallback_used,
+        id=result.id,
+    )
+    return result
+
+
+async def _generate(
+    request: GenerateRequest,
+    model: str,
+    settings: Settings,
+    cache: CacheService,
+    http_client: httpx.AsyncClient | None,
 ) -> GenerateResponse:
     """Orchestrate generation: cache check → generate → save → cache set."""
-    model = request.model or settings.default_model
-
-    # Validate model
     if model not in SUPPORTED_MODELS:
         raise GenerationError(
+            ErrorCode.MODEL_NOT_FOUND,
             f"Model '{model}' not found. Use GET /v1/models for available models.",
-            status_code=400,
+            fields=["model"],
         )
 
     cache_key = compute_cache_key(request.prompt, model, request.aspect_ratio, request.size, request.style)
@@ -276,13 +435,7 @@ async def handle_generate(
     if cached is not None:
         CACHE_HITS.inc()
         REQUEST_COUNT.labels(model=model, status="cached").inc()
-        return GenerateResponse(
-            id=cached["id"],
-            image_url=cached["image_url"],
-            model=cached["model"],
-            cached=True,
-            created_at=cached["created_at"],
-        )
+        return _cached_response(cached, model)
 
     # Acquire lock (thundering herd protection)
     lock_acquired = await cache.acquire_lock(cache_key)
@@ -291,14 +444,8 @@ async def handle_generate(
             await asyncio.sleep(0.5)
             cached = await cache.get_cached(cache_key)
             if cached is not None:
-                return GenerateResponse(
-                    id=cached["id"],
-                    image_url=cached["image_url"],
-                    model=cached["model"],
-                    cached=True,
-                    created_at=cached["created_at"],
-                )
-        raise GenerationError("Generation timed out waiting for lock")
+                return _cached_response(cached, model)
+        raise GenerationError(ErrorCode.GENERATION_IN_PROGRESS)
 
     try:
         with GENERATION_DURATION.labels(model=model).time():
@@ -340,11 +487,12 @@ async def handle_generate(
             id=gen_id,
             image_url=image_url,
             model=model,
+            requested_model=model,
             cached=False,
             created_at=created_at,
         )
-    except GenerationError:
-        GENERATION_ERRORS.labels(model=model, error_type="generation").inc()
+    except GenerationError as e:
+        GENERATION_ERRORS.labels(model=model, error_type=e.code.value).inc()
         REQUEST_COUNT.labels(model=model, status="error").inc()
         raise
     finally:
