@@ -57,6 +57,20 @@ async def test_generate_invalid_aspect_ratio(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    [
+        {"aspect_ratio": "1" * 5000 + ":1"},
+        {"size": "1" * 5000 + "x1"},
+    ],
+)
+async def test_generate_oversized_dimension_digits(client: httpx.AsyncClient, field: dict):
+    """Over-long digit runs → 422, not a 500 from int() hitting the 4300-digit limit."""
+    resp = await client.post("/v1/generate", json={"prompt": "test", **field})
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_generate_upstream_error(
     client: httpx.AsyncClient,
     app,

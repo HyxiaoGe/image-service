@@ -51,7 +51,9 @@ def _parse_ratio(value: str | None) -> tuple[int, int] | None:
     """Parse ``"W:H"`` or ``"WxH"`` into a positive ``(w, h)`` tuple, else None."""
     if not value:
         return None
-    m = re.fullmatch(r"(\d+)[:x](\d+)", value.strip())
+    # Bounded digit runs: real ratios/sizes are short, and unbounded runs can
+    # exceed int()'s 4300-digit limit (ValueError) on user-supplied input.
+    m = re.fullmatch(r"(\d{1,5})[:x](\d{1,5})", value.strip())
     if not m:
         return None
     w, h = int(m.group(1)), int(m.group(2))

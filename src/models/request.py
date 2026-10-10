@@ -20,14 +20,14 @@ class GenerateRequest(BaseModel):
     @field_validator("aspect_ratio")
     @classmethod
     def validate_aspect_ratio(cls, v: str) -> str:
-        if not re.fullmatch(r"\d+:\d+", v):
+        if not re.fullmatch(r"\d{1,5}:\d{1,5}", v):
             raise ValueError("aspect_ratio must match pattern N:N (e.g. 16:9)")
         return v
 
     @field_validator("size")
     @classmethod
     def validate_size(cls, v: str) -> str:
-        m = re.fullmatch(r"(\d+)x(\d+)", v)
+        m = re.fullmatch(r"(\d{1,5})x(\d{1,5})", v)
         if not m:
             raise ValueError("size must match pattern WxH (e.g. 1024x1024)")
         w, h = int(m.group(1)), int(m.group(2))

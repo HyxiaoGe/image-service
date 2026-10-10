@@ -63,3 +63,8 @@ def test_resolve_ark_size_preserves_orientation():
     assert w > h
     w, h = _dims(_resolve_ark_size("9:16", None))
     assert h > w
+
+
+def test_resolve_ark_size_ignores_oversized_digits():
+    # Digit runs past Python's 4300-digit int() limit must fall back, not raise.
+    assert _resolve_ark_size("1" * 5000 + ":1", "1" * 5000 + "x1") == "1920x1920"
