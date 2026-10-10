@@ -60,6 +60,10 @@ class GenerationError(Exception):
 
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 300.0  # 5 minutes — complex prompts can take a while
+# The generation lock must outlive the slowest possible generation (every attempt
+# timing out plus retry sleeps), or a second identical request could start a
+# duplicate upstream call while the first is still running.
+LOCK_TTL_SECONDS = int(REQUEST_TIMEOUT * (MAX_RETRIES + 1)) + 60
 
 # Upstream POST attempts (incl. retries) for the current request; read by the
 # summary log in handle_generate.
@@ -350,9 +354,13 @@ async def call_seedream_images(
     raise GenerationError(ErrorCode.NO_IMAGE_RETURNED, upstream_detail="no b64_json in Ark response")
 
 
-def save_image(image_bytes: bytes, cache_key: str, fmt: str, storage_dir: str) -> str:
-    """Save image to disk and return the relative URL path."""
-    filename = f"{cache_key}.{fmt}"
+def save_image(image_bytes: bytes, gen_id: str, fmt: str, storage_dir: str) -> str:
+    """Save image to disk under its generation id and return the filename.
+
+    Named by generation id, not cache key, so a regenerated image never
+    overwrites a file whose URL was already handed out.
+    """
+    filename = f"{gen_id}.{fmt}"
     path = Path(storage_dir) / filename
     path.write_bytes(image_bytes)
     logger.info("image_saved", path=str(path), size=len(image_bytes))
@@ -387,6 +395,7 @@ async def handle_generate(
         "requested_model": requested_model,
         "aspect_ratio": request.aspect_ratio,
         "size": request.size,
+        "no_cache": request.no_cache,
         "prompt_len": len(request.prompt),
         "prompt_sha8": hashlib.sha256(request.prompt.encode()).hexdigest()[:8],
     }
@@ -451,22 +460,23 @@ async def _generate(
 
     cache_key = compute_cache_key(request.prompt, model, request.aspect_ratio, request.size, request.style)
 
-    # Check cache
-    cached = await cache.get_cached(cache_key)
-    if cached is not None:
-        CACHE_HITS.inc()
-        REQUEST_COUNT.labels(model=model, status="cached").inc()
-        return _cached_response(cached, model)
+    lock_token: str | None = None
+    if not request.no_cache:
+        cached = await cache.get_cached(cache_key)
+        if cached is not None:
+            CACHE_HITS.inc()
+            REQUEST_COUNT.labels(model=model, status="cached").inc()
+            return _cached_response(cached, model)
 
-    # Acquire lock (thundering herd protection)
-    lock_acquired = await cache.acquire_lock(cache_key)
-    if not lock_acquired:
-        for _ in range(20):
-            await asyncio.sleep(0.5)
-            cached = await cache.get_cached(cache_key)
+        # Thundering-herd protection: one generation per parameter set; identical
+        # requests wait for its result. no_cache skips this — the caller asked
+        # for a fresh image, not the one an in-flight request will produce.
+        lock_token = await cache.acquire_lock(cache_key, ttl=LOCK_TTL_SECONDS)
+        if lock_token is None:
+            cached = await cache.wait_for_cached(cache_key)
             if cached is not None:
                 return _cached_response(cached, model)
-        raise GenerationError(ErrorCode.GENERATION_IN_PROGRESS)
+            raise GenerationError(ErrorCode.GENERATION_IN_PROGRESS)
 
     try:
         with GENERATION_DURATION.labels(model=model).time():
@@ -490,9 +500,9 @@ async def _generate(
                     aspect_ratio=request.aspect_ratio,
                 )
 
-        filename = save_image(image_bytes, cache_key, fmt, settings.storage_dir)
-
         gen_id = str(uuid.uuid4())
+        filename = save_image(image_bytes, gen_id, fmt, settings.storage_dir)
+
         image_url = f"{settings.static_url_prefix}/{filename}"
         created_at = datetime.now(UTC).isoformat()
 
@@ -518,4 +528,5 @@ async def _generate(
         REQUEST_COUNT.labels(model=model, status="error").inc()
         raise
     finally:
-        await cache.release_lock(cache_key)
+        if lock_token is not None:
+            await cache.release_lock(cache_key, lock_token)

@@ -11,6 +11,10 @@ class GenerateRequest(BaseModel):
     aspect_ratio: str = Field("1:1", description="Aspect ratio e.g. 16:9")
     size: str = Field("1024x1024", description="Dimensions as WxH")
     style: str | None = Field(None, description="Style hint e.g. watercolor")
+    no_cache: bool = Field(
+        False,
+        description="Skip the cache and generate a new image (e.g. regenerate). The result still replaces the cache entry.",
+    )
 
     @field_validator("prompt")
     @classmethod

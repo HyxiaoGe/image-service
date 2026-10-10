@@ -58,6 +58,7 @@ async def generate_image(
     aspect_ratio: str = "1:1",
     size: str = "1024x1024",
     style: str | None = None,
+    no_cache: bool = False,
 ) -> ToolResult:
     """Generate an image from a text prompt via the image-service backend.
 
@@ -67,6 +68,8 @@ async def generate_image(
         aspect_ratio: Aspect ratio e.g. '16:9', '1:1'. Default '1:1'.
         size: Output dimensions as 'WxH'. Default '1024x1024'.
         style: Style hint e.g. 'watercolor', 'photorealistic' (optional).
+        no_cache: Set true to regenerate: skip the cached image for identical
+            parameters and produce a new one (it then replaces the cache entry).
 
     On failure the text starts with "Error generating image [<code>]:" and the
     structured content is {"ok": false, "error": {"code", "message", "retryable", ...}}.
@@ -81,6 +84,7 @@ async def generate_image(
             aspect_ratio=aspect_ratio,
             size=size,
             style=style,
+            no_cache=no_cache,
         )
     except ValidationError as e:
         errors = e.errors()

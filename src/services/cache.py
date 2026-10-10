@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import secrets
+import time
 
 import redis.asyncio as aioredis
 import structlog
 
 logger = structlog.get_logger()
 
-LOCK_TTL_SECONDS = 30
 LOCK_POLL_INTERVAL = 0.5
-LOCK_MAX_WAIT = 60
+LOCK_MAX_WAIT = 120  # how long an identical request waits for the lock holder
 
 
 # Bump when cached images stop matching what the same parameters produce now.
@@ -48,19 +50,34 @@ class CacheService:
         )
         logger.info("cache_set", cache_key=cache_key)
 
-    async def acquire_lock(self, cache_key: str) -> bool:
-        """Try to acquire a generation lock. Returns True if acquired."""
-        acquired = await self.redis.set(
-            f"lock:image:{cache_key}",
-            "1",
-            nx=True,
-            ex=LOCK_TTL_SECONDS,
-        )
-        return acquired is not None and acquired is not False
+    async def acquire_lock(self, cache_key: str, ttl: int = 60) -> str | None:
+        """Try to acquire the generation lock. Returns an owner token, or None if held."""
+        token = secrets.token_hex(8)
+        acquired = await self.redis.set(f"lock:image:{cache_key}", token, nx=True, ex=ttl)
+        return token if acquired else None
 
-    async def release_lock(self, cache_key: str) -> None:
-        """Release a generation lock."""
-        await self.redis.delete(f"lock:image:{cache_key}")
+    async def release_lock(self, cache_key: str, token: str) -> None:
+        """Release the lock only if we still own it (it may have expired and been re-taken)."""
+        key = f"lock:image:{cache_key}"
+        if await self.redis.get(key) == token:
+            await self.redis.delete(key)
+
+    async def wait_for_cached(self, cache_key: str) -> dict | None:
+        """Wait for the lock holder's result.
+
+        Returns the cached metadata once it appears, or None if the lock is gone
+        without a result (the holder failed) or LOCK_MAX_WAIT elapses.
+        """
+        deadline = time.monotonic() + LOCK_MAX_WAIT
+        while time.monotonic() < deadline:
+            await asyncio.sleep(LOCK_POLL_INTERVAL)
+            cached = await self.get_cached(cache_key)
+            if cached is not None:
+                return cached
+            if not await self.redis.exists(f"lock:image:{cache_key}"):
+                # Holder finished; re-check once in case it wrote between our reads.
+                return await self.get_cached(cache_key)
+        return None
 
     async def ping(self) -> bool:
         """Check if Redis is reachable."""
