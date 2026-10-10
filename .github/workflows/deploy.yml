@@ -7,7 +7,7 @@ jobs:
   check:
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Ruff lint
         run: ~/.local/bin/ruff check .
       - name: Architecture check
@@ -16,7 +16,7 @@ jobs:
     needs: check
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Record start time
         run: echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
