@@ -28,6 +28,20 @@ jobs:
           docker compose up -d --build
           docker image prune -f
 
+      - name: Health check
+        run: |
+          # compose up returns before the app is serving; a crash-looping
+          # container must fail the deploy instead of passing silently.
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8090/v1/health; then
+              echo; echo "healthy after ${i} attempt(s)"; exit 0
+            fi
+            sleep 2
+          done
+          echo "image-service did not become healthy within 60s"
+          docker logs --tail 50 image-service
+          exit 1
+
       - name: Push deploy metrics
         if: always()
         run: bash ~/scripts/push-deploy-metrics.sh image-service main ${{ job.status }} ${{ env.BUILD_START }}
