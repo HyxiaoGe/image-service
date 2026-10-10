@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import structlog
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from pydantic import ValidationError
 
 from src.config import SUPPORTED_MODELS, Settings

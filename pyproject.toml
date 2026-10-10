@@ -10,7 +10,7 @@ dependencies = [
     "redis[hiredis]>=5.2.0",
     "pydantic-settings>=2.7.0",
     "structlog>=24.4.0",
-    "fastmcp>=2.0.0",
+    "fastmcp>=3.4,<5",
     "python-multipart>=0.0.18",
     "prometheus-client>=0.21.0",
 ]
