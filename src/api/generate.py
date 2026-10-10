@@ -23,6 +23,7 @@ def error_response(
     *,
     model: str | None = None,
     fields: list[str] | None = None,
+    fallback_from: dict[str, str] | None = None,
 ) -> JSONResponse:
     spec = ERROR_SPECS[code]
     return JSONResponse(
@@ -33,6 +34,7 @@ def error_response(
             retryable=spec.retryable,
             model=model,
             fields=fields,
+            fallback_from=fallback_from,
         ).model_dump(exclude_none=True),
     )
 
@@ -76,7 +78,7 @@ async def generate(body: GenerateRequest, request: Request) -> GenerateResponse 
         http_client = getattr(request.app.state, "http_client", None)
         return await handle_generate(body, settings, cache, http_client=http_client, entry="rest")
     except GenerationError as e:
-        return error_response(e.code, e.message, model=e.model, fields=e.fields)
+        return error_response(e.code, e.message, model=e.model, fields=e.fields, fallback_from=e.fallback_from)
     except Exception:
         # handle_generate already logged the traceback; never leak it to the caller.
         return error_response(ErrorCode.INTERNAL_ERROR)

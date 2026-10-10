@@ -34,6 +34,7 @@ def _error_result(
     *,
     model: str | None = None,
     fields: list[str] | None = None,
+    fallback_from: dict[str, str] | None = None,
 ) -> ToolResult:
     """Failure result: text keeps the ``Error`` prefix callers already match on,
     structured content carries the code. ``isError`` stays false so existing MCP
@@ -45,6 +46,8 @@ def _error_result(
         error["model"] = model
     if fields:
         error["fields"] = fields
+    if fallback_from:
+        error["fallback_from"] = fallback_from
     return ToolResult(
         content=f"Error generating image [{code.value}]: {message}",
         structured_content={"ok": False, "error": error},
@@ -58,6 +61,7 @@ async def generate_image(
     aspect_ratio: str = "1:1",
     size: str = "1024x1024",
     style: str | None = None,
+    fallback_model: str | None = None,
     no_cache: bool = False,
 ) -> ToolResult:
     """Generate an image from a text prompt via the image-service backend.
@@ -68,6 +72,9 @@ async def generate_image(
         aspect_ratio: Aspect ratio e.g. '16:9', '1:1'. Default '1:1'.
         size: Output dimensions as 'WxH'. Default '1024x1024'.
         style: Style hint e.g. 'watercolor', 'photorealistic' (optional).
+        fallback_model: Model to retry with once if `model`'s content filter blocks
+            the request (optional, off by default). Only content_filtered triggers
+            it; the result's "Model" line shows which model produced the image.
         no_cache: Set true to regenerate: skip the cached image for identical
             parameters and produce a new one (it then replaces the cache entry).
 
@@ -84,6 +91,7 @@ async def generate_image(
             aspect_ratio=aspect_ratio,
             size=size,
             style=style,
+            fallback_model=fallback_model,
             no_cache=no_cache,
         )
     except ValidationError as e:
@@ -94,7 +102,7 @@ async def generate_image(
     try:
         result = await handle_generate(request, _settings, _cache, http_client=_http_client, entry="mcp")
     except GenerationError as e:
-        return _error_result(e.code, e.message, model=e.model, fields=e.fields)
+        return _error_result(e.code, e.message, model=e.model, fields=e.fields, fallback_from=e.fallback_from)
     except Exception:
         # handle_generate already logged the traceback; never leak it to the caller.
         return _error_result(ErrorCode.INTERNAL_ERROR)

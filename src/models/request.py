@@ -11,6 +11,11 @@ class GenerateRequest(BaseModel):
     aspect_ratio: str = Field("1:1", description="Aspect ratio e.g. 16:9")
     size: str = Field("1024x1024", description="Dimensions as WxH")
     style: str | None = Field(None, description="Style hint e.g. watercolor")
+    fallback_model: str | None = Field(
+        None,
+        description="Model to retry with once if the primary model's content filter blocks the request. "
+        "Off by default; other failures never fall back.",
+    )
     no_cache: bool = Field(
         False,
         description="Skip the cache and generate a new image (e.g. regenerate). The result still replaces the cache entry.",

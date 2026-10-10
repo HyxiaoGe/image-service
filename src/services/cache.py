@@ -21,10 +21,24 @@ LOCK_MAX_WAIT = 120  # how long an identical request waits for the lock holder
 CACHE_KEY_VERSION = "v2"
 
 
-def compute_cache_key(prompt: str, model: str, aspect_ratio: str, size: str, style: str | None = None) -> str:
-    """Compute SHA-256 cache key from normalized generation parameters."""
+def compute_cache_key(
+    prompt: str,
+    model: str,
+    aspect_ratio: str,
+    size: str,
+    style: str | None = None,
+    fallback_model: str | None = None,
+) -> str:
+    """Compute SHA-256 cache key from normalized generation parameters.
+
+    fallback_model is part of the key so a fallback result is never served to a
+    caller that did not opt in; it is appended only when set, keeping keys for
+    plain requests unchanged.
+    """
     style_part = (style or "").strip().lower()
     raw = f"{CACHE_KEY_VERSION}:{prompt.strip().lower()}:{model.lower()}:{aspect_ratio}:{size}:{style_part}"
+    if fallback_model:
+        raw += f":fallback={fallback_model.lower()}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 

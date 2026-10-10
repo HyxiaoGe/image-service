@@ -20,6 +20,12 @@ CACHE_HITS = Counter(
     "Total cache hits for image generation",
 )
 
+FALLBACKS = Counter(
+    "image_fallback_total",
+    "Fallback attempts after the primary model's content filter blocked a request",
+    ["from_model", "to_model", "outcome"],
+)
+
 GENERATION_ERRORS = Counter(
     "image_generation_errors_total",
     "Total image generation errors",

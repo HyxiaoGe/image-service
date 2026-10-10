@@ -41,4 +41,5 @@ class ErrorResponse(BaseModel):
     retryable: bool | None = None
     model: str | None = None
     fields: list[str] | None = None  # invalid_params: offending request fields
+    fallback_from: dict[str, str] | None = None  # fallback also failed: primary model and its error code
     retry_after: int | None = None

@@ -21,6 +21,7 @@ from src.models.response import GenerateResponse
 from src.services.cache import CacheService, compute_cache_key
 from src.services.metrics import (
     CACHE_HITS,
+    FALLBACKS,
     GENERATION_DURATION,
     GENERATION_ERRORS,
     REQUEST_COUNT,
@@ -45,6 +46,7 @@ class GenerationError(Exception):
         upstream_status: int | None = None,
         upstream_detail: str | None = None,
         fields: list[str] | None = None,
+        fallback_from: dict[str, str] | None = None,
     ):
         spec = ERROR_SPECS[code]
         self.code = code
@@ -55,6 +57,7 @@ class GenerationError(Exception):
         self.upstream_status = upstream_status
         self.upstream_detail = upstream_detail[:500] if upstream_detail else None
         self.fields = fields
+        self.fallback_from = fallback_from  # set when the fallback model also failed
         super().__init__(self.message)
 
 
@@ -373,6 +376,7 @@ def _cached_response(cached: dict, requested_model: str) -> GenerateResponse:
         image_url=cached["image_url"],
         model=cached["model"],
         requested_model=requested_model,
+        fallback_used=cached["model"] != requested_model,
         cached=True,
         created_at=cached["created_at"],
     )
@@ -395,6 +399,7 @@ async def handle_generate(
         "requested_model": requested_model,
         "aspect_ratio": request.aspect_ratio,
         "size": request.size,
+        "fallback_model": request.fallback_model,
         "no_cache": request.no_cache,
         "prompt_len": len(request.prompt),
         "prompt_sha8": hashlib.sha256(request.prompt.encode()).hexdigest()[:8],
@@ -420,6 +425,7 @@ async def handle_generate(
             error_code=e.code.value,
             upstream_status=e.upstream_status,
             upstream_detail=e.upstream_detail,
+            fallback_from=e.fallback_from,
         )
         raise
     except Exception:
@@ -435,6 +441,107 @@ async def handle_generate(
     return result
 
 
+def _check_aspect_ratio(model: str, aspect_ratio: str, field: str) -> None:
+    allowed = SUPPORTED_MODELS[model].aspect_ratios
+    if allowed is not None and aspect_ratio not in allowed:
+        raise GenerationError(
+            ErrorCode.INVALID_PARAMS,
+            f"aspect_ratio '{aspect_ratio}' is not supported by {model}. Supported: {', '.join(allowed)}.",
+            fields=[field],
+        )
+
+
+def _validate(request: GenerateRequest, model: str) -> None:
+    """Reject bad model / ratio / fallback before touching the cache or upstream."""
+    if model not in SUPPORTED_MODELS:
+        raise GenerationError(
+            ErrorCode.MODEL_NOT_FOUND,
+            f"Model '{model}' not found. Use GET /v1/models for available models.",
+            fields=["model"],
+        )
+    _check_aspect_ratio(model, request.aspect_ratio, "aspect_ratio")
+
+    fallback = request.fallback_model
+    if fallback is None:
+        return
+    if fallback not in SUPPORTED_MODELS:
+        raise GenerationError(
+            ErrorCode.INVALID_PARAMS,
+            f"fallback_model '{fallback}' not found. Use GET /v1/models for available models.",
+            fields=["fallback_model"],
+        )
+    if fallback == model:
+        raise GenerationError(
+            ErrorCode.INVALID_PARAMS,
+            "fallback_model must differ from model.",
+            fields=["fallback_model"],
+        )
+    # Checked up front so a fallback can't fail on a ratio we already know it rejects.
+    _check_aspect_ratio(fallback, request.aspect_ratio, "fallback_model")
+
+
+async def _call_model(
+    request: GenerateRequest,
+    model: str,
+    settings: Settings,
+    http_client: httpx.AsyncClient | None,
+) -> tuple[bytes, str]:
+    """One upstream generation with ``model``; counts per-model duration and errors."""
+    try:
+        with GENERATION_DURATION.labels(model=model).time():
+            if SUPPORTED_MODELS[model].endpoint_type == "images":
+                return await call_seedream_images(
+                    prompt=request.prompt,
+                    model=model,
+                    settings=settings,
+                    style=request.style,
+                    http_client=http_client,
+                    aspect_ratio=request.aspect_ratio,
+                    size=request.size,
+                )
+            return await call_gemini(
+                prompt=request.prompt,
+                model=model,
+                settings=settings,
+                style=request.style,
+                http_client=http_client,
+                aspect_ratio=request.aspect_ratio,
+            )
+    except GenerationError as e:
+        e.model = e.model or model
+        GENERATION_ERRORS.labels(model=model, error_type=e.code.value).inc()
+        raise
+
+
+async def _generate_with_fallback(
+    request: GenerateRequest,
+    model: str,
+    settings: Settings,
+    http_client: httpx.AsyncClient | None,
+) -> tuple[bytes, str, str]:
+    """Generate with ``model``; on content_filtered only, try ``fallback_model`` once.
+
+    Returns (image bytes, format, model that produced the image).
+    """
+    fallback = request.fallback_model
+    try:
+        image_bytes, fmt = await _call_model(request, model, settings, http_client)
+        return image_bytes, fmt, model
+    except GenerationError as e:
+        if fallback is None or e.code != ErrorCode.CONTENT_FILTERED:
+            raise
+
+    logger.info("fallback_started", from_model=model, to_model=fallback)
+    try:
+        image_bytes, fmt = await _call_model(request, fallback, settings, http_client)
+    except GenerationError as e:
+        FALLBACKS.labels(from_model=model, to_model=fallback, outcome="error").inc()
+        e.fallback_from = {"model": model, "code": ErrorCode.CONTENT_FILTERED.value}
+        raise
+    FALLBACKS.labels(from_model=model, to_model=fallback, outcome="success").inc()
+    return image_bytes, fmt, fallback
+
+
 async def _generate(
     request: GenerateRequest,
     model: str,
@@ -442,23 +549,12 @@ async def _generate(
     cache: CacheService,
     http_client: httpx.AsyncClient | None,
 ) -> GenerateResponse:
-    """Orchestrate generation: cache check → generate → save → cache set."""
-    if model not in SUPPORTED_MODELS:
-        raise GenerationError(
-            ErrorCode.MODEL_NOT_FOUND,
-            f"Model '{model}' not found. Use GET /v1/models for available models.",
-            fields=["model"],
-        )
+    """Orchestrate generation: validate → cache check → generate (with fallback) → save → cache set."""
+    _validate(request, model)
 
-    allowed = SUPPORTED_MODELS[model].aspect_ratios
-    if allowed is not None and request.aspect_ratio not in allowed:
-        raise GenerationError(
-            ErrorCode.INVALID_PARAMS,
-            f"aspect_ratio '{request.aspect_ratio}' is not supported by {model}. Supported: {', '.join(allowed)}.",
-            fields=["aspect_ratio"],
-        )
-
-    cache_key = compute_cache_key(request.prompt, model, request.aspect_ratio, request.size, request.style)
+    cache_key = compute_cache_key(
+        request.prompt, model, request.aspect_ratio, request.size, request.style, request.fallback_model
+    )
 
     lock_token: str | None = None
     if not request.no_cache:
@@ -479,26 +575,7 @@ async def _generate(
             raise GenerationError(ErrorCode.GENERATION_IN_PROGRESS)
 
     try:
-        with GENERATION_DURATION.labels(model=model).time():
-            if SUPPORTED_MODELS[model].endpoint_type == "images":
-                image_bytes, fmt = await call_seedream_images(
-                    prompt=request.prompt,
-                    model=model,
-                    settings=settings,
-                    style=request.style,
-                    http_client=http_client,
-                    aspect_ratio=request.aspect_ratio,
-                    size=request.size,
-                )
-            else:
-                image_bytes, fmt = await call_gemini(
-                    prompt=request.prompt,
-                    model=model,
-                    settings=settings,
-                    style=request.style,
-                    http_client=http_client,
-                    aspect_ratio=request.aspect_ratio,
-                )
+        image_bytes, fmt, actual_model = await _generate_with_fallback(request, model, settings, http_client)
 
         gen_id = str(uuid.uuid4())
         filename = save_image(image_bytes, gen_id, fmt, settings.storage_dir)
@@ -509,23 +586,23 @@ async def _generate(
         metadata = {
             "id": gen_id,
             "image_url": image_url,
-            "model": model,
+            "model": actual_model,
             "created_at": created_at,
         }
         await cache.set_cached(cache_key, metadata)
 
-        REQUEST_COUNT.labels(model=model, status="success").inc()
+        REQUEST_COUNT.labels(model=actual_model, status="success").inc()
         return GenerateResponse(
             id=gen_id,
             image_url=image_url,
-            model=model,
+            model=actual_model,
             requested_model=model,
+            fallback_used=actual_model != model,
             cached=False,
             created_at=created_at,
         )
     except GenerationError as e:
-        GENERATION_ERRORS.labels(model=model, error_type=e.code.value).inc()
-        REQUEST_COUNT.labels(model=model, status="error").inc()
+        REQUEST_COUNT.labels(model=e.model or model, status="error").inc()
         raise
     finally:
         if lock_token is not None:
