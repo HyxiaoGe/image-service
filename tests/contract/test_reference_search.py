@@ -347,9 +347,9 @@ async def test_candidates_are_capped_per_page_and_in_total(client, web):
 
     await post(client, reference_subject="iPhone 18 Pro")
 
-    fetched = [str(r.url) for r in web.requests if r.url.host.endswith("example.com")]
-    assert len(fetched) == reference_search.MAX_DOWNLOADS
-    assert max(sum(1 for u in fetched if f"site{i}." in u) for i in range(5)) <= reference_search.MAX_PER_PAGE
+    hosts = [r.url.host for r in web.requests if str(r.url) in many]
+    assert len(hosts) == reference_search.MAX_DOWNLOADS
+    assert max(hosts.count(f"site{i}.example.com") for i in range(5)) <= reference_search.MAX_PER_PAGE
 
 
 @pytest.mark.asyncio
