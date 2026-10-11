@@ -4,7 +4,7 @@ Flow (design: fusion-workspace/workspace-docs/image-service-reference-search-des
 per-subject cache → one Tavily search (always runs, query built by us) → rule
 filtering (download, not an image, too small, duplicates) → one vision-model call
 that finds the appearance most candidates agree on and checks each image against
-it → pick back views first, then by source domain and resolution.
+it → pick complete back views first, then by source domain and resolution.
 
 Source domains only order candidates; they never make an image pass. Any failure
 here degrades to "no found image" — reference search never fails a generation.
@@ -44,7 +44,7 @@ TAVILY_KEY_COOLDOWNS: dict[int, float | None] = {401: None, 432: 86400.0, 433: 8
 
 MAX_PER_PAGE = 8  # one product page can carry 100+ images; keep sources mixed
 MAX_DOWNLOADS = 24
-MIN_SHORT_SIDE = 768
+MIN_SHORT_SIDE = 600  # keeps 1200x630 og / 1312x738 newsroom images from official sites
 MAX_JUDGED = 12
 # Images go to the judge base64-inline (~4/3 size); stay well under Gemini's 20 MB.
 JUDGE_MAX_BYTES = 12 * 1024 * 1024
@@ -103,10 +103,12 @@ it in `consensus_appearance`. Images showing a different design are a minority a
 Step 2: For each image, decide whether it shows the product with that majority design ("matches_consensus").
 Reject: a different design (older/other models), concept or fan renders, product mostly hidden by a case or
 accessory, collages of several different products, text-dominated images, screenshots, unrelated products.
+Also record whether the whole device is in frame ("whole_device": false for close-ups or crops that cut part
+of it off). This is for ranking only and does not affect "matches_consensus".
 
 Return JSON only:
 {{"consensus_appearance": str,
-  "images": [{{"index": int, "matches_consensus": bool, "view": "back|front|side|other",
+  "images": [{{"index": int, "matches_consensus": bool, "view": "back|front|side|other", "whole_device": bool,
               "kind": "photo|official_render|concept|unrelated", "reason": str}}]}}"""
 
 
@@ -318,7 +320,15 @@ async def _judge(subject: str, batch: list[Candidate], settings: Settings, clien
 
 def _select(batch: list[Candidate], limit: int) -> list[Candidate]:
     passed = [c for c in batch if c.verdict.get("matches_consensus") is True]
-    passed.sort(key=lambda c: (c.verdict.get("view") != "back", _tier(c.domain), -(c.size[0] * c.size[1])))
+    # Complete back views first: a cropped close-up shows too little of the design to copy.
+    passed.sort(
+        key=lambda c: (
+            c.verdict.get("view") != "back",
+            c.verdict.get("whole_device") is not True,
+            _tier(c.domain),
+            -(c.size[0] * c.size[1]),
+        )
+    )
     return passed[:limit]
 
 

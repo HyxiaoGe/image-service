@@ -52,7 +52,7 @@ class Web(httpx.AsyncBaseTransport):
             ],
             "images": [],
         }
-        # index -> (matches_consensus, view); unlisted images fail.
+        # url -> (matches_consensus, view[, whole_device=True]); unlisted images fail.
         self.verdicts: dict[str, tuple[bool, str]] = {
             BACK: (True, "back"),
             BACK_2: (True, "back"),
@@ -91,8 +91,17 @@ class Web(httpx.AsyncBaseTransport):
             return self.judge_response
         images = []
         for i, url in enumerate(self.judged_urls(len(self.judge_calls()) - 1)):
-            ok, view = self.verdicts.get(url, (False, "other"))
-            images.append({"index": i, "matches_consensus": ok, "view": view, "kind": "official_render", "reason": "r"})
+            ok, view, whole, *_ = (*self.verdicts.get(url, (False, "other")), True)
+            images.append(
+                {
+                    "index": i,
+                    "matches_consensus": ok,
+                    "view": view,
+                    "whole_device": whole,
+                    "kind": "photo",
+                    "reason": "r",
+                }
+            )
         content = json.dumps({"consensus_appearance": "wide camera plateau", "images": images})
         return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
@@ -316,7 +325,7 @@ async def test_rule_filters_before_judging(client, web):
     page = "https://www.apple.com/img/page"
     dup = "https://www.apple.com/img/back-copy.png"
     private = "http://127.0.0.1/secret.png"
-    web.files[small] = httpx.Response(200, content=png(600, 900, b"small"))
+    web.files[small] = httpx.Response(200, content=png(599, 900, b"small"))
     web.files[page] = httpx.Response(200, text="<html>instagram</html>")
     web.files[dup] = httpx.Response(200, content=web.files[BACK].content)
     web.verdicts[dup] = web.verdicts[BACK]  # the mock judge can't tell identical bytes apart
@@ -486,3 +495,28 @@ async def test_generation_cache_ttl_follows_search_outcome(client, web, app, fak
 
     [key] = [k async for k in fake_redis.scan_iter("image:*")]
     assert expected - 5 < await fake_redis.ttl(key) <= expected
+
+
+@pytest.mark.asyncio
+async def test_whole_back_view_beats_close_up(client, web):
+    # Both apple backs are cropped close-ups: the complete media back wins despite its domain.
+    web.verdicts[BACK] = web.verdicts[BACK_2] = (True, "back", False)
+
+    data = (await post(client, reference_subject="iPhone 18 Pro")).json()
+
+    assert data["reference_images_used"] == [MEDIA_BACK]
+    [payload] = web.judge_calls()
+    assert '"whole_device": bool' in payload["messages"][0]["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_og_sized_official_images_are_judged(client, web):
+    og = "https://www.apple.com/img/og.png"
+    web.files[og] = httpx.Response(200, content=png(1200, 630, b"og"))
+    web.verdicts[og] = (True, "back")
+    web.tavily_default["results"][0]["images"] = [{"url": og}]
+    web.tavily_default["results"][1]["images"] = []
+
+    data = (await post(client, reference_subject="iPhone 18 Pro")).json()
+
+    assert data["reference_images_used"] == [og]
