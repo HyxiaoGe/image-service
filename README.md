@@ -12,8 +12,8 @@
 
 | 环境变量 | 当前取值 | 作用 |
 |---|---|---|
-| `DEFAULT_MODEL` | `gemini-3.1-flash-image-preview` | 默认出图模型 |
-| `DEFAULT_FALLBACK_MODEL` | `doubao-seedream-4-5` | 主模型被内容审核拦截（`content_filtered`）时换用的模型；留空表示不启用默认备用 |
+| `DEFAULT_MODEL` | `gemini-nano-banana-2.1` | 默认出图模型 |
+| `DEFAULT_FALLBACK_MODEL` | `doubao-seedream-5-0-pro` | 主模型被内容审核拦截（`content_filtered`）时换用的模型；留空表示不启用默认备用 |
 
 切换步骤（不需要改代码）：
 
@@ -28,8 +28,8 @@ curl -s localhost:8090/v1/health
 例如让 Seedream 当主力、Gemini 当备用：
 
 ```
-DEFAULT_MODEL=doubao-seedream-4-5
-DEFAULT_FALLBACK_MODEL=gemini-3.1-flash-image-preview
+DEFAULT_MODEL=doubao-seedream-5-0-pro
+DEFAULT_FALLBACK_MODEL=gemini-nano-banana-2.1
 ```
 
 说明：
@@ -40,6 +40,22 @@ DEFAULT_FALLBACK_MODEL=gemini-3.1-flash-image-preview
 - 调用方传 `fallback_model: "none"` 可以关闭本次请求的备用。
 - 备用模型参与缓存 key，所以修改 `DEFAULT_FALLBACK_MODEL` 后，已有缓存不会再被命中，同样的请求会重新生成一次。
 - 返回里的 `model` 是实际出图的模型，`requested_model` 是请求的模型，`fallback_used` 表示是否走了备用。
+
+## 支持的模型
+
+完整列表以 `GET /v1/models` 为准（含每个模型支持的比例和是否支持搜索增强）。
+
+| 模型 ID | 上游 | 说明 |
+|---|---|---|
+| `gemini-nano-banana-2.1` | Gemini | 默认模型，Google 当前最新稳定版；支持网页 + 图片搜索 |
+| `gemini-3.1-flash-image` | Gemini | Nano Banana 2 稳定版；支持网页 + 图片搜索 |
+| `gemini-3-pro-image` | Gemini | Nano Banana Pro 稳定版；只支持网页搜索 |
+| `doubao-seedream-5-0-pro` | 火山方舟 `doubao-seedream-5-0-pro-260628` | 默认备用模型 |
+| `doubao-seedream-5-0-flash` | 火山方舟 `doubao-seedream-5-0-flash-260915` | 更快更便宜 |
+| `doubao-seedream-5-0-lite` | 火山方舟 `doubao-seedream-5-0-260128` | |
+| `doubao-seedream-4-5` / `doubao-seedream-4-0` | 火山方舟，由 `ARK_MODEL_ID` 决定（默认 4.5） | 两个别名实际调用同一个版本 |
+| `gemini-3.1-flash-image-preview`、`gemini-3-pro-image-preview`、`nano-banana-pro-preview` | Gemini | 预览版，已过 Google 公布的最早下线日期（2026-06-25），随时可能停用，请换成上面的稳定版 |
+| `gemini-2.5-flash-image` | Gemini | 计划 2027-03-15 下线；不支持搜索 |
 
 ## 参考图（reference_images）
 

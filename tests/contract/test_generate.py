@@ -137,6 +137,32 @@ async def test_generate_seedream_request_body(client: httpx.AsyncClient, app):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "wire_id"),
+    [
+        ("doubao-seedream-5-0-pro", "doubao-seedream-5-0-pro-260628"),
+        ("doubao-seedream-5-0-flash", "doubao-seedream-5-0-flash-260915"),
+        ("doubao-seedream-5-0-lite", "doubao-seedream-5-0-260128"),
+    ],
+)
+async def test_generate_seedream_50_request_body(client: httpx.AsyncClient, app, model: str, wire_id: str):
+    """5.0 models send their pinned wire id and omit sequential_image_generation (Ark 400s on it)."""
+    app.state.settings.ark_api_key = "test-ark-key"
+    transport = MockTransport(response_data=make_seedream_response())
+    app.state.http_client = httpx.AsyncClient(transport=transport)
+
+    resp = await client.post("/v1/generate", json={"prompt": "x", "model": model, "aspect_ratio": "16:9"})
+
+    assert resp.status_code == 200
+    assert resp.json()["model"] == model
+    sent = json.loads(transport.last_request.content)
+    assert sent["model"] == wire_id
+    assert "sequential_image_generation" not in sent
+    assert sent["watermark"] is False
+    assert sent["size"] == "2560x1440"
+
+
+@pytest.mark.asyncio
 async def test_generate_seedream_explicit_landscape_size(client: httpx.AsyncClient, app):
     """A 16:9 request locks a landscape size instead of letting Seedream pick."""
     app.state.settings.ark_api_key = "test-ark-key"

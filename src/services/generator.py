@@ -94,11 +94,14 @@ def _google_search_tool(search_types: tuple[str, ...]) -> dict:
 # they surface as an HTTP error instead of a 200 with finish_reason=content_filter.
 _GEMINI_SAFETY_MARKERS = ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST")
 
-# Seedream image-size constraints. 4.5 rejects any size below 3,686,400 px
-# ("image size must be at least 3686400 pixels"); 4.0 also accepts these
-# dimensions, so a single floor keeps the size logic model-agnostic. Sides are
-# aligned to 32px and clamped to Ark's [1024, 4096] per-side range.
+# Seedream image-size constraints. 4.5 and 5.0 Lite reject any size below
+# 3,686,400 px ("image size must be at least 3686400 pixels"); 4.0 also accepts
+# these dimensions, and 5.0 Pro / Flash accept areas in [921,600, 4,624,220]
+# (verified 2026-10-11), so a single floor keeps the size logic model-agnostic
+# as long as results stay under ARK_MAX_PIXELS. Sides are aligned to 32px and
+# clamped to Ark's [1024, 4096] per-side range.
 ARK_MIN_PIXELS = 3_686_400  # e.g. 2560x1440 (16:9), 1920x1920 (1:1)
+ARK_MAX_PIXELS = 4_624_220  # 5.0 Pro / Flash ceiling
 ARK_MIN_SIDE = 1024
 ARK_MAX_SIDE = 4096
 ARK_SIZE_ALIGN = 32
@@ -390,14 +393,16 @@ async def call_seedream_images(
     if style:
         content = f"{prompt}, style: {style}"
 
+    info = SUPPORTED_MODELS[model]
     payload = {
-        "model": settings.ark_model_id,
+        "model": info.ark_model_id or settings.ark_model_id,
         "prompt": content,
         "size": _resolve_ark_size(aspect_ratio, size),
         "response_format": "b64_json",
-        "sequential_image_generation": "disabled",
         "watermark": False,
     }
+    if info.sequential_param:
+        payload["sequential_image_generation"] = "disabled"
     if reference_images:
         uris = [ref.data_uri for ref in reference_images]
         payload["image"] = uris[0] if len(uris) == 1 else uris

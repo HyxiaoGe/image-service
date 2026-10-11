@@ -132,5 +132,5 @@ def test_settings_empty_fallback_disables(monkeypatch):
 
 def test_settings_defaults():
     s = Settings(_env_file=None)
-    assert s.default_model == FLASH_31
-    assert s.default_fallback_model == SEEDREAM
+    assert s.default_model == "gemini-nano-banana-2.1"
+    assert s.default_fallback_model == "doubao-seedream-5-0-pro"

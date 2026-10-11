@@ -12,7 +12,8 @@ SearchType = Literal["web", "image"]
 # Aspect ratios Gemini image models accept via imageConfig.aspectRatio, verified
 # against the live API on 2026-10-10 (unsupported ratios return HTTP 400).
 GEMINI_ASPECT_RATIOS: tuple[str, ...] = ("1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9")
-# 3.1 Flash additionally accepts the extreme ratios.
+# 3.1 Flash additionally accepts the extreme ratios, and so do the GA models
+# (nano-banana-2.1, 3.1-flash-image, 3-pro-image; verified 2026-10-11).
 GEMINI_FLASH_31_ASPECT_RATIOS: tuple[str, ...] = (*GEMINI_ASPECT_RATIOS, "1:4", "4:1", "1:8", "8:1")
 
 
@@ -25,6 +26,8 @@ class ModelInfo:
         endpoint_type: EndpointType = "chat",
         aspect_ratios: tuple[str, ...] | None = None,
         search_types: tuple[SearchType, ...] = (),
+        ark_model_id: str | None = None,
+        sequential_param: bool = False,
     ) -> None:
         self.id = id
         self.name = name
@@ -37,6 +40,11 @@ class ModelInfo:
         # tool is not enabled"); 3 Pro / Nano Banana Pro reject image search
         # ("Image search as tool is not enabled").
         self.search_types = search_types
+        # Seedream only: pinned Ark wire id; None runs Settings.ark_model_id.
+        self.ark_model_id = ark_model_id
+        # Seedream 4.x accepts sequential_image_generation; 5.0 rejects it with
+        # HTTP 400 ("not supported by the current model").
+        self.sequential_param = sequential_param
 
     @property
     def grounding(self) -> bool:
@@ -44,6 +52,29 @@ class ModelInfo:
 
 
 SUPPORTED_MODELS: dict[str, ModelInfo] = {
+    "gemini-nano-banana-2.1": ModelInfo(
+        id="gemini-nano-banana-2.1",
+        name="Nano Banana 2.1",
+        provider="Google",
+        aspect_ratios=GEMINI_FLASH_31_ASPECT_RATIOS,
+        search_types=("web", "image"),
+    ),
+    "gemini-3.1-flash-image": ModelInfo(
+        id="gemini-3.1-flash-image",
+        name="Gemini 3.1 Flash Image (Nano Banana 2)",
+        provider="Google",
+        aspect_ratios=GEMINI_FLASH_31_ASPECT_RATIOS,
+        search_types=("web", "image"),
+    ),
+    "gemini-3-pro-image": ModelInfo(
+        id="gemini-3-pro-image",
+        name="Gemini 3 Pro Image (Nano Banana Pro)",
+        provider="Google",
+        aspect_ratios=GEMINI_FLASH_31_ASPECT_RATIOS,
+        search_types=("web",),
+    ),
+    # Google preview ids: past their earliest shutdown date (2026-06-25) and may
+    # stop working at any time; kept for callers that still pass them.
     "nano-banana-pro-preview": ModelInfo(
         id="nano-banana-pro-preview",
         name="Nano Banana Pro",
@@ -71,17 +102,41 @@ SUPPORTED_MODELS: dict[str, ModelInfo] = {
         provider="Google",
         aspect_ratios=GEMINI_ASPECT_RATIOS,
     ),
+    "doubao-seedream-5-0-pro": ModelInfo(
+        id="doubao-seedream-5-0-pro",
+        name="Doubao Seedream 5.0 Pro",
+        provider="Volcano",
+        endpoint_type="images",
+        ark_model_id="doubao-seedream-5-0-pro-260628",
+    ),
+    "doubao-seedream-5-0-flash": ModelInfo(
+        id="doubao-seedream-5-0-flash",
+        name="Doubao Seedream 5.0 Flash",
+        provider="Volcano",
+        endpoint_type="images",
+        ark_model_id="doubao-seedream-5-0-flash-260915",
+    ),
+    "doubao-seedream-5-0-lite": ModelInfo(
+        id="doubao-seedream-5-0-lite",
+        name="Doubao Seedream 5.0 Lite",
+        provider="Volcano",
+        endpoint_type="images",
+        ark_model_id="doubao-seedream-5-0-260128",
+    ),
+    # Both 4.x aliases run Settings.ark_model_id (4.5 by default).
     "doubao-seedream-4-5": ModelInfo(
         id="doubao-seedream-4-5",
         name="Doubao Seedream 4.5",
         provider="Volcano",
         endpoint_type="images",
+        sequential_param=True,
     ),
     "doubao-seedream-4-0": ModelInfo(
         id="doubao-seedream-4-0",
         name="Doubao Seedream 4.0",
         provider="Volcano",
         endpoint_type="images",
+        sequential_param=True,
     ),
 }
 
@@ -93,9 +148,9 @@ class Settings(BaseSettings):
     litellm_api_key: str = Field("", description="LiteLLM Virtual Key")
     # Main / backup models when the caller omits model / fallback_model. Switch
     # them by editing these env vars and restarting (see README).
-    default_model: str = "gemini-3.1-flash-image-preview"
+    default_model: str = "gemini-nano-banana-2.1"
     default_fallback_model: str | None = Field(
-        "doubao-seedream-4-5",
+        "doubao-seedream-5-0-pro",
         description="Backup model on content_filtered when the caller passes no fallback_model; empty disables",
     )
     redis_url: str = "redis://redis:6379/0"
@@ -114,9 +169,9 @@ class Settings(BaseSettings):
         "https://ark.cn-beijing.volces.com/api/v3",
         description="Ark OpenAI-compatible base URL",
     )
-    # Version selector for the Seedream path: every Volcano alias in
-    # SUPPORTED_MODELS runs whichever wire id this pins. Bump this env to change
-    # the deployed Seedream version without touching code.
+    # Version selector for the Seedream 4.x aliases: both run whichever wire id
+    # this pins (5.0 models pin their own in SUPPORTED_MODELS). Bump this env to
+    # change the deployed 4.x version without touching code.
     ark_model_id: str = Field(
         "doubao-seedream-4-5-251128",
         description="Ark Seedream wire model id (version-pinned)",

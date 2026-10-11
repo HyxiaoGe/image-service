@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.generator import ARK_MIN_PIXELS, _resolve_ark_size
+from src.services.generator import ARK_MAX_PIXELS, ARK_MIN_PIXELS, _resolve_ark_size
 
 
 def _dims(size: str) -> tuple[int, int]:
@@ -47,11 +47,13 @@ def test_resolve_ark_size_ignores_garbage():
 
 @pytest.mark.parametrize(
     "aspect_ratio",
-    ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "2:3", "3:2"],
+    ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "2:3", "3:2", "7:5", "1:4", "4:1", "1:8", "8:1", "1:30"],
 )
 def test_resolve_ark_size_always_meets_pixel_floor(aspect_ratio: str):
     w, h = _dims(_resolve_ark_size(aspect_ratio, None))
     assert w * h >= ARK_MIN_PIXELS
+    # Seedream 5.0 Pro / Flash reject areas above 4,624,220 px.
+    assert w * h <= ARK_MAX_PIXELS
     # Every side stays on the 32px alignment grid and within Ark's bounds.
     assert w % 32 == 0 and h % 32 == 0
     assert 1024 <= w <= 4096 and 1024 <= h <= 4096
