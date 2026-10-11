@@ -49,7 +49,10 @@ def compute_cache_key(
         # cached result until TTL or no_cache.
         raw += ":refs=" + "\n".join(reference_images)
     if reference_subject:
-        raw += f":subject={reference_subject.strip().lower()}"
+        # Versioned with the reference search: images made with references picked
+        # (or prompted) under older rules must not be served again (v2: whole back
+        # views first + reference hint in the prompt).
+        raw += f":subject@v2={reference_subject.strip().lower()}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 

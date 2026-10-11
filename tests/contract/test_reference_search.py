@@ -591,3 +591,11 @@ async def test_hint_reaches_seedream_fallback(client, web, app):
     assert data["fallback_used"] is True
     [ark] = [json.loads(r.content) for r in web.requests if r.url.path.endswith("/images/generations")]
     assert ark["prompt"].endswith(HINT)
+
+
+def test_cache_keys_are_versioned():
+    from src.services.cache import compute_cache_key
+
+    assert reference_search._cache_key("iPhone 18 Pro").startswith("refsearch:v2:")
+    old = compute_cache_key("p", "m", "1:1", "1024x1024", None, None, False, None, None)
+    assert compute_cache_key("p", "m", "1:1", "1024x1024", None, None, False, None, "iPhone 18 Pro") != old

@@ -53,7 +53,9 @@ JUDGE_TIMEOUT = 90.0
 FOUND_TTL = 7 * 24 * 3600
 # A miss is retried soon: one bad search must not block a subject for a week.
 NONE_ACCEPTED_TTL = 3600
-CACHE_PREFIX = "refsearch:v1:"
+# Bump when selection rules change so entries picked under old rules are dropped
+# (v2: 600px threshold, whole back views first).
+CACHE_PREFIX = "refsearch:v2:"
 # How long an image generated under each outcome may be served from the image
 # cache: an image made without the reference must not outlive the search miss.
 # search_failed keeps it just long enough for requests waiting on the same lock.
