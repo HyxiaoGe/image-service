@@ -64,6 +64,7 @@ async def generate_image(
     fallback_model: str | None = None,
     grounding: bool = False,
     reference_images: list[str] | None = None,
+    reference_subject: str | None = None,
     no_cache: bool = False,
 ) -> ToolResult:
     """Generate an image from a text prompt via the image-service backend.
@@ -85,6 +86,13 @@ async def generate_image(
         reference_images: Up to 3 public http(s) image URLs (PNG/JPEG/WebP, max
             4 MB each) for the model to follow, e.g. the real product's look or an
             image to edit. Image URLs returned by this tool also work.
+        reference_subject: The specific real-world object whose real look must be
+            followed, e.g. a product model like 'iPhone 18 Pro'. The service then
+            searches real photos of it and passes the best match to the model.
+            Set it only when the user names such an object; it is never guessed
+            from the prompt. "Reference search" shows the outcome: found,
+            none_accepted (nothing usable found, so the look may differ from the
+            real product), search_failed, or skipped (no free reference slot).
         no_cache: Set true to regenerate: skip the cached image for identical
             parameters and produce a new one (it then replaces the cache entry).
 
@@ -104,6 +112,7 @@ async def generate_image(
             fallback_model=fallback_model,
             grounding=grounding,
             reference_images=reference_images,
+            reference_subject=reference_subject,
             no_cache=no_cache,
         )
     except ValidationError as e:
@@ -130,6 +139,10 @@ async def generate_image(
         f"Fallback used: {result.fallback_used}",
         f"Grounding used: {result.grounding_used}",
     ]
+    if result.reference_images_used:
+        lines.append(f"Reference images used: {', '.join(result.reference_images_used)}")
+    if result.reference_search:
+        lines.append(f"Reference search: {result.reference_search.status}")
     return ToolResult(
         content="\n".join(lines),
         structured_content={
@@ -141,6 +154,8 @@ async def generate_image(
             "grounding_used": result.grounding_used,
             "cached": result.cached,
             "id": result.id,
+            "reference_images_used": result.reference_images_used,
+            "reference_search": result.reference_search.model_dump() if result.reference_search else None,
         },
     )
 

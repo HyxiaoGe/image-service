@@ -5,7 +5,7 @@ AI image generation middleware. Wraps Google Gemini API behind a FastAPI REST + 
 ## Architecture
 
 - `src/api/` -- REST endpoints (generate, models, health)
-- `src/services/` -- business logic (generator, cache, metrics)
+- `src/services/` -- business logic (generator, cache, metrics, references, reference_search)
 - `src/middleware/` -- auth (Bearer token) and rate limiting
 - `src/models/` -- Pydantic request/response schemas
 - `src/mcp/` -- FastMCP tool server (generate_image, list_models)
@@ -32,7 +32,7 @@ python scripts/check_architecture.py                                 # layer dep
 
 ## Config
 
-Env vars loaded from `.env` (see `.env.example`). Key settings: `LITELLM_BASE_URL`, `LITELLM_API_KEY`, `REDIS_URL`, `DEFAULT_MODEL`, `DEFAULT_FALLBACK_MODEL` (switching: see README), `API_KEY` (optional auth), `SERVICE_BASE_URL`.
+Env vars loaded from `.env` (see `.env.example`). Key settings: `LITELLM_BASE_URL`, `LITELLM_API_KEY`, `REDIS_URL`, `DEFAULT_MODEL`, `DEFAULT_FALLBACK_MODEL` (switching: see README), `API_KEY` (optional auth), `SERVICE_BASE_URL`, `TAVILY_API_KEYS` (reference_subject search; see README).
 
 ## Docs index
 

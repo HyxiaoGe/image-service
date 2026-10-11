@@ -171,6 +171,40 @@ def _sniff_mime(data: bytes) -> str | None:
     return None
 
 
+def image_size(data: bytes) -> tuple[int, int] | None:
+    """(width, height) from a PNG / JPEG / WebP header, or None if unreadable."""
+    try:
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            chunk = data[12:16]
+            if chunk == b"VP8X":
+                return 1 + int.from_bytes(data[24:27], "little"), 1 + int.from_bytes(data[27:30], "little")
+            if chunk == b"VP8 ":
+                return int.from_bytes(data[26:28], "little") & 0x3FFF, int.from_bytes(data[28:30], "little") & 0x3FFF
+            if chunk == b"VP8L":
+                bits = int.from_bytes(data[21:25], "little")
+                return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+            return None
+        if data.startswith(b"\xff\xd8"):
+            i = 2
+            while i + 9 <= len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:  # standalone markers
+                    i += 2
+                    continue
+                length = int.from_bytes(data[i + 2 : i + 4], "big")
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):  # SOFn frame header
+                    return int.from_bytes(data[i + 7 : i + 9], "big"), int.from_bytes(data[i + 5 : i + 7], "big")
+                i += 2 + length
+    except IndexError:
+        return None
+    return None
+
+
 async def load_reference_images(urls: list[str], settings: Settings, client: httpx.AsyncClient) -> list[ReferenceImage]:
     """Fetch all reference images concurrently. Raises ReferenceImageError on the first unusable one."""
 

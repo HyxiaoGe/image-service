@@ -177,6 +177,13 @@ class Settings(BaseSettings):
         description="Ark Seedream wire model id (version-pinned)",
     )
 
+    # Automatic reference search (reference_subject): Tavily key pool shared with
+    # Fusion's reader-service (comma separated), the vision model that judges the
+    # candidates, and how many found images go to the image model.
+    tavily_api_keys: str = Field("", description="Comma-separated Tavily API keys; empty disables reference search")
+    reference_judge_model: str = Field("gemini-3.8-flash", description="LiteLLM model judging reference candidates")
+    reference_search_images: int = Field(1, ge=1, le=2, description="Found reference images passed to the model")
+
     @field_validator("default_fallback_model", mode="before")
     @classmethod
     def _empty_fallback_is_none(cls, v: object) -> object:

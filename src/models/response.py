@@ -3,6 +3,16 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 
+class ReferenceSearchInfo(BaseModel):
+    # found: at least one image passed; none_accepted: searched, nothing passed;
+    # search_failed: search or judging failed (not cached); skipped: no free slot
+    # left after the caller's reference_images.
+    status: str
+    cached: bool = False  # result came from the per-subject search cache
+    candidates: int = 0  # images judged
+    accepted: int = 0  # images that passed
+
+
 class GenerateResponse(BaseModel):
     id: str
     image_url: str
@@ -12,6 +22,8 @@ class GenerateResponse(BaseModel):
     grounding_used: bool = False  # search tool was enabled for the model that produced the image
     cached: bool
     created_at: str
+    reference_images_used: list[str] = []  # reference images sent to the model (caller's first, then found ones)
+    reference_search: ReferenceSearchInfo | None = None  # only when reference_subject was set
 
 
 class ModelInfoResponse(BaseModel):

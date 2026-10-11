@@ -34,6 +34,13 @@ class GenerateRequest(BaseModel):
         description=f"Up to {MAX_REFERENCE_IMAGES} public http(s) image URLs (PNG/JPEG/WebP, <= 4 MB each) "
         "the model should follow, e.g. the real product's look or an image to edit.",
     )
+    reference_subject: str | None = Field(
+        None,
+        max_length=200,
+        description="The specific real-world object to draw accurately, e.g. a product model ('iPhone 18 Pro'). "
+        "When set, the service searches for real photos of it and passes the best match as a reference image "
+        "(after any reference_images, within the 3-image limit). Never inferred from the prompt.",
+    )
     no_cache: bool = Field(
         False,
         description="Skip the cache and generate a new image (e.g. regenerate). The result still replaces the cache entry.",
@@ -48,6 +55,12 @@ class GenerateRequest(BaseModel):
             if not re.fullmatch(r"https?://\S+", url):
                 raise ValueError("reference_images must be http(s) URLs")
         return v
+
+    @field_validator("reference_subject")
+    @classmethod
+    def strip_reference_subject(cls, v: str | None) -> str | None:
+        v = " ".join(v.split()) if v else None
+        return v or None
 
     @field_validator("prompt")
     @classmethod

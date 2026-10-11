@@ -31,3 +31,9 @@ GENERATION_ERRORS = Counter(
     "Total image generation errors",
     ["model", "error_type"],
 )
+
+REFERENCE_SEARCHES = Counter(
+    "image_reference_search_total",
+    "Automatic reference image searches (reference_subject) by outcome",
+    ["status"],
+)

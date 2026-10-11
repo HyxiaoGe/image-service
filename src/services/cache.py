@@ -30,6 +30,7 @@ def compute_cache_key(
     fallback_model: str | None = None,
     grounding: bool = False,
     reference_images: list[str] | None = None,
+    reference_subject: str | None = None,
 ) -> str:
     """Compute SHA-256 cache key from normalized generation parameters.
 
@@ -47,6 +48,8 @@ def compute_cache_key(
         # Keyed by URL, not content: a URL whose image changes keeps serving the
         # cached result until TTL or no_cache.
         raw += ":refs=" + "\n".join(reference_images)
+    if reference_subject:
+        raw += f":subject={reference_subject.strip().lower()}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -63,12 +66,12 @@ class CacheService:
         logger.info("cache_hit", cache_key=cache_key)
         return json.loads(data)
 
-    async def set_cached(self, cache_key: str, metadata: dict) -> None:
-        """Store generation metadata in cache with TTL."""
+    async def set_cached(self, cache_key: str, metadata: dict, ttl: int | None = None) -> None:
+        """Store generation metadata in cache with TTL (default: the configured cache TTL)."""
         await self.redis.set(
             f"image:{cache_key}",
             json.dumps(metadata),
-            ex=self.ttl,
+            ex=min(ttl, self.ttl) if ttl else self.ttl,
         )
         logger.info("cache_set", cache_key=cache_key)
 

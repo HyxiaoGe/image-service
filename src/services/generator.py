@@ -16,8 +16,8 @@ import structlog
 
 from src.config import SUPPORTED_MODELS, Settings
 from src.models.errors import ERROR_SPECS, ErrorCode
-from src.models.request import GenerateRequest
-from src.models.response import GenerateResponse
+from src.models.request import MAX_REFERENCE_IMAGES, GenerateRequest
+from src.models.response import GenerateResponse, ReferenceSearchInfo
 from src.services.cache import CacheService, compute_cache_key
 from src.services.metrics import (
     CACHE_HITS,
@@ -26,6 +26,7 @@ from src.services.metrics import (
     GENERATION_ERRORS,
     REQUEST_COUNT,
 )
+from src.services.reference_search import GENERATION_TTL, SearchOutcome, find_references
 from src.services.references import ReferenceImage, ReferenceImageError, load_reference_images
 
 logger = structlog.get_logger()
@@ -451,6 +452,8 @@ def _cached_response(cached: dict, requested_model: str) -> GenerateResponse:
         grounding_used=cached.get("grounding_used", False),
         cached=True,
         created_at=cached["created_at"],
+        reference_images_used=cached.get("reference_images_used") or [],
+        reference_search=cached.get("reference_search"),
     )
 
 
@@ -474,6 +477,7 @@ async def handle_generate(
         "size": request.size,
         "grounding": request.grounding,
         "no_cache": request.no_cache,
+        "reference_subject": request.reference_subject,
         "prompt_len": len(request.prompt),
         "prompt_sha8": hashlib.sha256(request.prompt.encode()).hexdigest()[:8],
         # Overwritten with the effective value once validation passes.
@@ -645,6 +649,39 @@ async def _load_references(
     return references
 
 
+async def _find_references(
+    request: GenerateRequest,
+    caller_count: int,
+    settings: Settings,
+    cache: CacheService,
+    http_client: httpx.AsyncClient | None,
+) -> SearchOutcome | None:
+    """Search reference images for ``reference_subject`` into the slots the caller left free."""
+    if not request.reference_subject:
+        return None
+    started = time.perf_counter()
+    slots = MAX_REFERENCE_IMAGES - caller_count
+    if http_client is None:
+        async with httpx.AsyncClient() as client:
+            outcome = await find_references(
+                request.reference_subject, slots, settings, cache.redis, client, request.no_cache
+            )
+    else:
+        outcome = await find_references(
+            request.reference_subject, slots, settings, cache.redis, http_client, request.no_cache
+        )
+    _log_fields.get().update(
+        reference_search_status=outcome.status,
+        reference_search_cached=outcome.cached,
+        reference_candidates=outcome.candidates,
+        reference_accepted=outcome.accepted,
+        reference_found_count=len(outcome.images),
+        reference_search_total_ms=int((time.perf_counter() - started) * 1000),
+        **outcome.log,
+    )
+    return outcome
+
+
 async def _generate_with_fallback(
     request: GenerateRequest,
     model: str,
@@ -696,6 +733,7 @@ async def _generate(
         fallback,
         request.grounding,
         request.reference_images,
+        request.reference_subject,
     )
 
     lock_token: str | None = None
@@ -718,6 +756,18 @@ async def _generate(
 
     try:
         references = await _load_references(request, settings, http_client)
+        outcome = await _find_references(request, len(references), settings, cache, http_client)
+        reference_urls = list(request.reference_images or [])
+        reference_search = None
+        if outcome is not None:
+            references += outcome.images
+            reference_urls += outcome.urls
+            reference_search = ReferenceSearchInfo(
+                status=outcome.status,
+                cached=outcome.cached,
+                candidates=outcome.candidates,
+                accepted=outcome.accepted,
+            )
         image_bytes, fmt, actual_model = await _generate_with_fallback(
             request, model, fallback, settings, http_client, references
         )
@@ -735,8 +785,10 @@ async def _generate(
             "model": actual_model,
             "grounding_used": grounding_used,
             "created_at": created_at,
+            "reference_images_used": reference_urls,
+            "reference_search": reference_search.model_dump() if reference_search else None,
         }
-        await cache.set_cached(cache_key, metadata)
+        await cache.set_cached(cache_key, metadata, ttl=GENERATION_TTL.get(outcome.status) if outcome else None)
 
         REQUEST_COUNT.labels(model=actual_model, status="success").inc()
         return GenerateResponse(
@@ -748,6 +800,8 @@ async def _generate(
             grounding_used=grounding_used,
             cached=False,
             created_at=created_at,
+            reference_images_used=reference_urls,
+            reference_search=reference_search,
         )
     except GenerationError as e:
         REQUEST_COUNT.labels(model=e.model or model, status="error").inc()

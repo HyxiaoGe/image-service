@@ -68,3 +68,31 @@ DEFAULT_FALLBACK_MODEL=gemini-nano-banana-2.1
 - 下载失败、拿到的不是图片（例如网页）、超过大小上限时，返回 `invalid_params`，`fields=["reference_images"]`，message 会写明是第几张、什么原因。
 - 参考图 URL 会计入缓存 key。同一个 URL 背后的图片如果换了，缓存过期前会一直返回旧结果，需要重新生成时传 `no_cache: true`。
 - 主模型被拦截、换备用模型重试时，沿用已下载的参考图，不会重新下载。
+
+## 自动找参考图（reference_subject）
+
+传 `reference_subject`（例如 `"iPhone 18 Pro"`）时，服务会自动搜这个具体物件的真实照片，挑一张作为参考图传给模型。服务不会从 prompt 里猜，只在调用方明确传了这个参数时才找图。
+
+流程：
+1. 先查按 subject 的找图缓存（大小写和多余空格不影响命中）。
+2. 没命中就用 Tavily 搜一次，搜索词是 `"{subject} official product photo"`。
+3. 按规则筛掉：下载失败的、不是图片的、短边小于 768 的、内容重复的。最多下载 24 张，每个页面最多取 8 张，官方站点优先下载。
+4. 剩下的最多 12 张交给视觉模型（`REFERENCE_JUDGE_MODEL`，默认 `gemini-3.8-flash`）一次判断。它先找出多数图片一致的外观，再逐张判断是否符合。提示词明确告诉它产品已经发布，不能凭训练知识判断产品存不存在。
+5. 只从判断通过的图里选：背面图优先，其次官方站点，最后看分辨率。默认 1 张（`REFERENCE_SEARCH_IMAGES`，最多 2 张）。来源域名只用来排序，不会让一张图直接通过。
+
+返回结果：
+- `reference_images_used`：实际传给模型的参考图，调用方传的排在前面，找到的排在后面。
+- `reference_search`：`{status, cached, candidates, accepted}`。`status` 有四种：
+  - `found`：找到了。
+  - `none_accepted`：搜了但没有图通过。照常出图，调用方应如实告诉用户外观可能和真品不同。
+  - `search_failed`：搜索或判断出错，或没配 Tavily key。同样照常出图。
+  - `skipped`：调用方已经传满 3 张参考图，没有空位。
+
+缓存：
+- 找图结果：`found` 缓存 7 天，`none_accepted` 缓存 1 小时，`search_failed` 不缓存。传 `no_cache: true` 会跳过找图缓存，重新搜。
+- 出图缓存的 key 包含 subject。没找到参考图时生成的图，在出图缓存里最多保留 1 小时（`search_failed` 时 5 分钟），之后的请求会重新找图。
+- 缓存里记的图片 URL 如果已经失效，会删掉这条缓存，这一次按 `search_failed` 出图。
+
+`TAVILY_API_KEYS` 和 reader-service 共用同一个号池，用逗号分隔。某个 key 返回 401 时停用到服务重启，返回 432/433（额度用完）时停用 1 天，返回 429 时停用 1 分钟，期间自动换下一个 key。留空就不找图。每次没命中缓存的找图，大约花 1 个 Tavily credit 和 $0.01–0.04 的判断费用，耗时约 10–20 秒。另外，每多带一张参考图，出图本身也会慢一些（实测 1 张图约 38 秒，不带图约 15 秒）。
+
+已知局限：画面里有多台手机同框时，模型偶尔会把其中几台画回老款外观。
