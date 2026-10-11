@@ -23,12 +23,20 @@ def grounded_response() -> dict:
     body["vertex_ai_grounding_metadata"] = [
         {
             "searchEntryPoint": {"renderedContent": "<style>...</style>"},
-            "groundingChunks": [{"web": {"uri": "https://a", "title": "apple.com"}}, {"web": {"uri": "https://b"}}],
-            "webSearchQueries": ["iPhone 18 Pro colors", "iPhone 18 Pro design"],
+            "groundingChunks": [
+                {"web": {"uri": "https://a", "title": "apple.com"}},
+                {"image": {"sourceUri": "https://b", "imageUri": "https://b.jpg"}},
+                {"image": {"sourceUri": "https://c", "imageUri": "https://c.jpg"}},
+            ],
+            "webSearchQueries": ["iPhone 18 Pro colors"],
+            "imageSearchQueries": ["iPhone 18 Pro marketing photo", "iPhone 18 Pro back camera"],
         }
     ]
-    body["usage"] = {"prompt_tokens_details": {"web_search_requests": 2}}
     return body
+
+
+WEB_ONLY = {"googleSearch": {}}
+WEB_AND_IMAGE = {"googleSearch": {"searchTypes": {"webSearch": {}, "imageSearch": {}}}}
 
 
 def use(app, transport: httpx.AsyncBaseTransport):
@@ -43,15 +51,23 @@ async def post(client, **body):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model", [FLASH_31, "gemini-3-pro-image-preview", "nano-banana-pro-preview"])
-async def test_grounding_sends_search_tool(client, app, model):
+@pytest.mark.parametrize(
+    ("model", "tool"),
+    [
+        (FLASH_31, WEB_AND_IMAGE),
+        # These two answer 400 "Image search as tool is not enabled": web search only.
+        ("gemini-3-pro-image-preview", WEB_ONLY),
+        ("nano-banana-pro-preview", WEB_ONLY),
+    ],
+)
+async def test_grounding_sends_search_tool(client, app, model, tool):
     transport = use(app, MockTransport(response_data=grounded_response()))
 
     resp = await post(client, model=model, grounding=True)
 
     assert resp.status_code == 200
     assert resp.json()["grounding_used"] is True
-    assert json.loads(transport.last_request.content)["tools"] == [{"googleSearch": {}}]
+    assert json.loads(transport.last_request.content)["tools"] == [tool]
 
 
 @pytest.mark.asyncio
@@ -119,7 +135,7 @@ async def test_fallback_to_seedream_reports_no_grounding(client, app):
     assert data["fallback_used"] is True
     assert data["grounding_used"] is False
     gemini_req, ark_req = transport.requests
-    assert json.loads(gemini_req.content)["tools"] == [{"googleSearch": {}}]
+    assert json.loads(gemini_req.content)["tools"] == [WEB_AND_IMAGE]
     assert "tools" not in json.loads(ark_req.content)
 
 
@@ -139,16 +155,20 @@ async def test_grounding_summary_log(client, app, monkeypatch):
     [finished] = [kw for event, kw in events if event == "generation_finished"]
     assert finished["grounding"] is True
     assert finished["grounding_used"] is True
-    assert finished["search_queries"] == ["iPhone 18 Pro colors", "iPhone 18 Pro design"]
-    assert finished["search_sources"] == 2
-    assert finished["search_requests"] == 2
+    assert finished["search_queries"] == ["iPhone 18 Pro colors"]
+    assert finished["image_search_queries"] == ["iPhone 18 Pro marketing photo", "iPhone 18 Pro back camera"]
+    assert finished["search_sources"] == 1
+    assert finished["image_search_sources"] == 2
 
 
 @pytest.mark.asyncio
 async def test_models_endpoint_lists_grounding_support(client):
     models = {m["id"]: m for m in (await client.get("/v1/models")).json()["models"]}
     assert models[FLASH_31]["grounding"] is True
+    assert models[FLASH_31]["search_types"] == ["web", "image"]
+    assert models["gemini-3-pro-image-preview"]["search_types"] == ["web"]
     assert models[FLASH_25]["grounding"] is False
+    assert models[FLASH_25]["search_types"] == []
     assert models[SEEDREAM]["grounding"] is False
 
 

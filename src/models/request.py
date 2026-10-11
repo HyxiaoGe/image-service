@@ -18,7 +18,8 @@ class GenerateRequest(BaseModel):
     )
     grounding: bool = Field(
         False,
-        description="Let the model use Google Search (incl. image search) to draw recent products, "
+        description="Let the model use Google Search (web, plus image search where the model supports it; "
+        "see search_types in /v1/models) to draw recent products, "
         "places and events accurately. Ignored by models without search support; "
         "see grounding_used in the response.",
     )

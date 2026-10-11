@@ -147,6 +147,6 @@ async def list_models() -> str:
         ratios = ", ".join(model_info.aspect_ratios) if model_info.aspect_ratios else "any W:H"
         lines.append(
             f"{i}. {model_info.name} ({model_info.id}) — {model_info.provider} — aspect ratios: {ratios}"
-            + (" — grounding" if model_info.grounding else "")
+            + (f" — grounding: {' + '.join(model_info.search_types)} search" if model_info.grounding else "")
         )
     return "\n".join(lines)

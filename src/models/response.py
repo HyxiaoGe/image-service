@@ -19,7 +19,8 @@ class ModelInfoResponse(BaseModel):
     name: str
     provider: str
     aspect_ratios: list[str] | None = None
-    grounding: bool = False  # supports the grounding (Google Search) option  # None = any W:H ratio
+    grounding: bool = False  # supports the grounding (Google Search) option
+    search_types: list[str] = []  # what grounding searches with this model: "web", "image"
 
 
 class ModelsListResponse(BaseModel):

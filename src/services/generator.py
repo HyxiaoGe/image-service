@@ -76,7 +76,14 @@ _upstream_attempts: ContextVar[int] = ContextVar("upstream_attempts", default=0)
 # grounding was on; read by the summary log.
 _search_stats: ContextVar[dict[str, object] | None] = ContextVar("search_stats", default=None)
 
-GOOGLE_SEARCH_TOOL = {"googleSearch": {}}
+
+def _google_search_tool(search_types: tuple[str, ...]) -> dict:
+    """Gemini googleSearch tool. Without searchTypes Gemini only does web search;
+    image search must be requested explicitly (LiteLLM forwards searchTypes as-is)."""
+    if search_types == ("web",):
+        return {"googleSearch": {}}
+    return {"googleSearch": {"searchTypes": {f"{t}Search": {} for t in search_types}}}
+
 
 # Markers Gemini uses for safety blocks (blockReason / finishReason values) when
 # they surface as an HTTP error instead of a 200 with finish_reason=content_filter.
@@ -256,17 +263,28 @@ def _ark_http_error(resp: httpx.Response) -> GenerationError:
 
 
 def _search_summary(data: dict) -> dict[str, object]:
-    """Search queries / source count from LiteLLM's Gemini grounding metadata, for logs."""
-    queries: list[str] = []
-    sources = 0
+    """Search queries / source counts from LiteLLM's Gemini grounding metadata, for logs.
+
+    Empty queries mean the model chose not to search even though the tool was on.
+    """
+    web: list[str] = []
+    image: list[str] = []
+    web_sources = image_sources = 0
     for meta in data.get("vertex_ai_grounding_metadata") or []:
         if isinstance(meta, dict):
-            queries += meta.get("webSearchQueries") or []
-            queries += meta.get("imageSearchQueries") or []
-            sources += len(meta.get("groundingChunks") or [])
-    usage = data.get("usage") or {}
-    requests = (usage.get("prompt_tokens_details") or {}).get("web_search_requests") or 0
-    return {"search_queries": queries, "search_sources": sources, "search_requests": requests}
+            web += meta.get("webSearchQueries") or []
+            image += meta.get("imageSearchQueries") or []
+            for chunk in meta.get("groundingChunks") or []:
+                if "image" in chunk:
+                    image_sources += 1
+                else:
+                    web_sources += 1
+    return {
+        "search_queries": web,
+        "image_search_queries": image,
+        "search_sources": web_sources,
+        "image_search_sources": image_sources,
+    }
 
 
 async def call_gemini(
@@ -276,7 +294,7 @@ async def call_gemini(
     style: str | None = None,
     http_client: httpx.AsyncClient | None = None,
     aspect_ratio: str | None = None,
-    grounding: bool = False,
+    search_types: tuple[str, ...] = (),
 ) -> tuple[bytes, str]:
     """Call LiteLLM Proxy (OpenAI-compatible chat+modalities) and return (image_bytes, format_ext)."""
     content = prompt
@@ -295,10 +313,10 @@ async def call_gemini(
     if aspect_ratio:
         # LiteLLM forwards a top-level imageConfig to Gemini's generationConfig.
         payload["imageConfig"] = {"aspectRatio": aspect_ratio}
-    if grounding:
+    if search_types:
         # LiteLLM maps this to Gemini's google_search tool. The model still
         # decides whether to search; _search_stats records what it did.
-        payload["tools"] = [GOOGLE_SEARCH_TOOL]
+        payload["tools"] = [_google_search_tool(search_types)]
 
     url = f"{settings.litellm_base_url}/v1/chat/completions"
     headers = {
@@ -312,7 +330,7 @@ async def call_gemini(
         raise _gemini_http_error(resp)
 
     data = _json_body(resp, "litellm")
-    if grounding:
+    if search_types:
         _search_stats.set(_search_summary(data))
     choices = data.get("choices") or []
     if not choices:
@@ -544,7 +562,7 @@ async def _call_model(
                 style=request.style,
                 http_client=http_client,
                 aspect_ratio=request.aspect_ratio,
-                grounding=_grounding_applies(request, model),
+                search_types=SUPPORTED_MODELS[model].search_types if request.grounding else (),
             )
     except GenerationError as e:
         e.model = e.model or model

@@ -35,6 +35,8 @@ VARIANTS: dict[str, dict] = {
     "googleSearch": {"tools": [{"googleSearch": {}}]},
     "google_search": {"tools": [{"google_search": {}}]},
     "web_search_options": {"web_search_options": {}},
+    "image_search": {"tools": [{"googleSearch": {"searchTypes": {"webSearch": {}, "imageSearch": {}}}}]},
+    "image_search_snake": {"tools": [{"google_search": {"search_types": {"web_search": {}, "image_search": {}}}}]},
 }
 
 
