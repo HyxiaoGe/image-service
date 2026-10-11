@@ -63,6 +63,7 @@ async def generate_image(
     style: str | None = None,
     fallback_model: str | None = None,
     grounding: bool = False,
+    reference_images: list[str] | None = None,
     no_cache: bool = False,
 ) -> ToolResult:
     """Generate an image from a text prompt via the image-service backend.
@@ -81,6 +82,9 @@ async def generate_image(
             first, so recent products, landmarks and events are drawn accurately.
             Models without search support ignore it ("Grounding used" shows
             whether it applied).
+        reference_images: Up to 3 public http(s) image URLs (PNG/JPEG/WebP, max
+            4 MB each) for the model to follow, e.g. the real product's look or an
+            image to edit. Image URLs returned by this tool also work.
         no_cache: Set true to regenerate: skip the cached image for identical
             parameters and produce a new one (it then replaces the cache entry).
 
@@ -99,6 +103,7 @@ async def generate_image(
             style=style,
             fallback_model=fallback_model,
             grounding=grounding,
+            reference_images=reference_images,
             no_cache=no_cache,
         )
     except ValidationError as e:

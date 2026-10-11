@@ -40,3 +40,14 @@ DEFAULT_FALLBACK_MODEL=gemini-3.1-flash-image-preview
 - 调用方传 `fallback_model: "none"` 可以关闭本次请求的备用。
 - 备用模型参与缓存 key，所以修改 `DEFAULT_FALLBACK_MODEL` 后，已有缓存不会再被命中，同样的请求会重新生成一次。
 - 返回里的 `model` 是实际出图的模型，`requested_model` 是请求的模型，`fallback_used` 表示是否走了备用。
+
+## 参考图（reference_images）
+
+`POST /v1/generate` 和 MCP `generate_image` 都支持 `reference_images`：一组图片 URL，模型会参照这些图出图，比如照着真机外观画，或在某张图的基础上修改。
+
+- 最多 3 张，每张不超过 4 MB，支持 PNG、JPEG、WebP。服务会下载这些图，再以 base64 内联的方式传给上游：3 × 4 MB 编码后约 16 MB，在 Gemini 单次请求 20 MB 的内联上限以内。每多一张图，请求就多一次下载和更大的上游请求。
+- 只接受公网的 http(s) 地址。指向内网、本机或链路本地地址的 URL 会被拒绝，重定向的每一跳都会检查。
+- 本服务生成的图片 URL（`SERVICE_BASE_URL` + `/static/images/...`）直接从本地存储读取，不走网络。
+- 下载失败、拿到的不是图片（例如网页）、超过大小上限时，返回 `invalid_params`，`fields=["reference_images"]`，message 会写明是第几张、什么原因。
+- 参考图 URL 会计入缓存 key。同一个 URL 背后的图片如果换了，缓存过期前会一直返回旧结果，需要重新生成时传 `no_cache: true`。
+- 主模型被拦截、换备用模型重试时，沿用已下载的参考图，不会重新下载。

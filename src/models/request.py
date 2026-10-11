@@ -4,6 +4,10 @@ import re
 
 from pydantic import BaseModel, Field, field_validator
 
+# Enough for a few views of one subject (front / back / side); every image is
+# downloaded per request and sent upstream inline, so more costs latency and size.
+MAX_REFERENCE_IMAGES = 3
+
 
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=10000, description="Text prompt")
@@ -24,10 +28,26 @@ class GenerateRequest(BaseModel):
         "places and events accurately. Ignored by models without search support; "
         "see grounding_used in the response.",
     )
+    reference_images: list[str] | None = Field(
+        None,
+        max_length=MAX_REFERENCE_IMAGES,
+        description=f"Up to {MAX_REFERENCE_IMAGES} public http(s) image URLs (PNG/JPEG/WebP, <= 4 MB each) "
+        "the model should follow, e.g. the real product's look or an image to edit.",
+    )
     no_cache: bool = Field(
         False,
         description="Skip the cache and generate a new image (e.g. regenerate). The result still replaces the cache entry.",
     )
+
+    @field_validator("reference_images")
+    @classmethod
+    def validate_reference_images(cls, v: list[str] | None) -> list[str] | None:
+        if not v:
+            return None
+        for url in v:
+            if not re.fullmatch(r"https?://\S+", url):
+                raise ValueError("reference_images must be http(s) URLs")
+        return v
 
     @field_validator("prompt")
     @classmethod

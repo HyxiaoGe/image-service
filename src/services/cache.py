@@ -29,6 +29,7 @@ def compute_cache_key(
     style: str | None = None,
     fallback_model: str | None = None,
     grounding: bool = False,
+    reference_images: list[str] | None = None,
 ) -> str:
     """Compute SHA-256 cache key from normalized generation parameters.
 
@@ -42,6 +43,10 @@ def compute_cache_key(
         raw += f":fallback={fallback_model.lower()}"
     if grounding:
         raw += ":grounding"
+    if reference_images:
+        # Keyed by URL, not content: a URL whose image changes keeps serving the
+        # cached result until TTL or no_cache.
+        raw += ":refs=" + "\n".join(reference_images)
     return hashlib.sha256(raw.encode()).hexdigest()
 
 

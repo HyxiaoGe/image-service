@@ -26,6 +26,7 @@ from src.services.metrics import (
     GENERATION_ERRORS,
     REQUEST_COUNT,
 )
+from src.services.references import ReferenceImage, ReferenceImageError, load_reference_images
 
 logger = structlog.get_logger()
 
@@ -291,6 +292,17 @@ def _search_summary(data: dict) -> dict[str, object]:
     }
 
 
+def _gemini_content(text: str, reference_images: list[ReferenceImage] | None) -> str | list[dict]:
+    """Plain text, or OpenAI-style multi-part content (text first, then images) that
+    LiteLLM turns into Gemini inline image parts."""
+    if not reference_images:
+        return text
+    return [
+        {"type": "text", "text": text},
+        *({"type": "image_url", "image_url": {"url": ref.data_uri}} for ref in reference_images),
+    ]
+
+
 async def call_gemini(
     prompt: str,
     model: str,
@@ -299,6 +311,7 @@ async def call_gemini(
     http_client: httpx.AsyncClient | None = None,
     aspect_ratio: str | None = None,
     search_types: tuple[str, ...] = (),
+    reference_images: list[ReferenceImage] | None = None,
 ) -> tuple[bytes, str]:
     """Call LiteLLM Proxy (OpenAI-compatible chat+modalities) and return (image_bytes, format_ext)."""
     content = prompt
@@ -307,7 +320,7 @@ async def call_gemini(
 
     payload: dict[str, object] = {
         "model": f"gemini/{model}",
-        "messages": [{"role": "user", "content": content}],
+        "messages": [{"role": "user", "content": _gemini_content(content, reference_images)}],
         "modalities": ["text", "image"],
         # LiteLLM's response cache does not key on imageConfig and would hand back
         # an image with the wrong ratio (or a stale one on regenerate). This
@@ -367,6 +380,7 @@ async def call_seedream_images(
     http_client: httpx.AsyncClient | None = None,
     aspect_ratio: str | None = None,
     size: str | None = None,
+    reference_images: list[ReferenceImage] | None = None,
 ) -> tuple[bytes, str]:
     """Call Volcengine Ark (OpenAI Images API) for Seedream; return (image_bytes, 'jpeg')."""
     if not settings.ark_api_key:
@@ -384,6 +398,9 @@ async def call_seedream_images(
         "sequential_image_generation": "disabled",
         "watermark": False,
     }
+    if reference_images:
+        uris = [ref.data_uri for ref in reference_images]
+        payload["image"] = uris[0] if len(uris) == 1 else uris
 
     url = f"{settings.ark_base_url}/images/generations"
     headers = {
@@ -568,6 +585,7 @@ async def _call_model(
     model: str,
     settings: Settings,
     http_client: httpx.AsyncClient | None,
+    references: list[ReferenceImage],
 ) -> tuple[bytes, str]:
     """One upstream generation with ``model``; counts per-model duration and errors."""
     try:
@@ -581,6 +599,7 @@ async def _call_model(
                     http_client=http_client,
                     aspect_ratio=request.aspect_ratio,
                     size=request.size,
+                    reference_images=references,
                 )
             return await call_gemini(
                 prompt=request.prompt,
@@ -590,11 +609,35 @@ async def _call_model(
                 http_client=http_client,
                 aspect_ratio=request.aspect_ratio,
                 search_types=SUPPORTED_MODELS[model].search_types if request.grounding else (),
+                reference_images=references,
             )
     except GenerationError as e:
         e.model = e.model or model
         GENERATION_ERRORS.labels(model=model, error_type=e.code.value).inc()
         raise
+
+
+async def _load_references(
+    request: GenerateRequest, settings: Settings, http_client: httpx.AsyncClient | None
+) -> list[ReferenceImage]:
+    """Download reference images once (after the cache check, so hits stay fast)."""
+    if not request.reference_images:
+        return []
+    started = time.perf_counter()
+    try:
+        if http_client is None:
+            async with httpx.AsyncClient() as client:
+                references = await load_reference_images(request.reference_images, settings, client)
+        else:
+            references = await load_reference_images(request.reference_images, settings, http_client)
+    except ReferenceImageError as e:
+        raise GenerationError(ErrorCode.INVALID_PARAMS, e.message, fields=["reference_images"]) from None
+    _log_fields.get().update(
+        reference_count=len(references),
+        reference_bytes=sum(len(r.data) for r in references),
+        reference_ms=int((time.perf_counter() - started) * 1000),
+    )
+    return references
 
 
 async def _generate_with_fallback(
@@ -603,13 +646,14 @@ async def _generate_with_fallback(
     fallback: str | None,
     settings: Settings,
     http_client: httpx.AsyncClient | None,
+    references: list[ReferenceImage],
 ) -> tuple[bytes, str, str]:
     """Generate with ``model``; on content_filtered only, try ``fallback`` once.
 
     Returns (image bytes, format, model that produced the image).
     """
     try:
-        image_bytes, fmt = await _call_model(request, model, settings, http_client)
+        image_bytes, fmt = await _call_model(request, model, settings, http_client, references)
         return image_bytes, fmt, model
     except GenerationError as e:
         if fallback is None or e.code != ErrorCode.CONTENT_FILTERED:
@@ -617,7 +661,7 @@ async def _generate_with_fallback(
 
     logger.info("fallback_started", from_model=model, to_model=fallback)
     try:
-        image_bytes, fmt = await _call_model(request, fallback, settings, http_client)
+        image_bytes, fmt = await _call_model(request, fallback, settings, http_client, references)
     except GenerationError as e:
         FALLBACKS.labels(from_model=model, to_model=fallback, outcome="error").inc()
         e.fallback_from = {"model": model, "code": ErrorCode.CONTENT_FILTERED.value}
@@ -646,6 +690,7 @@ async def _generate(
         request.style,
         fallback,
         request.grounding,
+        request.reference_images,
     )
 
     lock_token: str | None = None
@@ -667,7 +712,10 @@ async def _generate(
             raise GenerationError(ErrorCode.GENERATION_IN_PROGRESS)
 
     try:
-        image_bytes, fmt, actual_model = await _generate_with_fallback(request, model, fallback, settings, http_client)
+        references = await _load_references(request, settings, http_client)
+        image_bytes, fmt, actual_model = await _generate_with_fallback(
+            request, model, fallback, settings, http_client, references
+        )
 
         grounding_used = _grounding_applies(request, actual_model)
         gen_id = str(uuid.uuid4())
