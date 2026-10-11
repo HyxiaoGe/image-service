@@ -88,7 +88,7 @@ REST 返回的 `image_url` 是相对路径，拼上服务地址即可访问；MC
 **本地开发**
 
 ```bash
-cp .env.example .env                                                  # 填 LITELLM_* / ARK_API_KEY / REDIS_URL
+cp .env.example .env                                                  # 填 LITELLM_* / ARK_API_KEY / DASHSCOPE_API_KEY / REDIS_URL
 uv run uvicorn src.main:create_app --factory --reload --port 8090    # 启动
 uv run pytest                                                         # 测试
 ruff check . && ruff format .                                         # lint + 格式化
@@ -144,6 +144,8 @@ DEFAULT_FALLBACK_MODEL=gemini-nano-banana-2.1
 | `doubao-seedream-5-0-pro` | 火山方舟 `doubao-seedream-5-0-pro-260628` | 默认备用模型 |
 | `doubao-seedream-5-0-flash` | 火山方舟 `doubao-seedream-5-0-flash-260915` | 更快更便宜 |
 | `doubao-seedream-5-0-lite` | 火山方舟 `doubao-seedream-5-0-260128` | |
+| `qwen-image-3.0-pro` | 阿里云百炼 | 中文文字、长 prompt 排版强；支持 1–3 张参考图；需要 `DASHSCOPE_API_KEY` |
+| `qwen-image-3.0` | 阿里云百炼 | 3.0 标准版，更便宜 |
 | `doubao-seedream-4-5` / `doubao-seedream-4-0` | 火山方舟，由 `ARK_MODEL_ID` 决定（默认 4.5） | 两个别名实际调用同一个版本 |
 | `gemini-3.1-flash-image-preview`、`gemini-3-pro-image-preview`、`nano-banana-pro-preview` | Gemini | 预览版，已过 Google 公布的最早下线日期（2026-06-25），随时可能停用，请换成上面的稳定版 |
 | `gemini-2.5-flash-image` | Gemini | 计划 2027-03-15 下线；不支持搜索 |

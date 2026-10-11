@@ -27,7 +27,7 @@ from src.services.metrics import (
     REQUEST_COUNT,
 )
 from src.services.reference_search import GENERATION_TTL, SearchOutcome, find_references
-from src.services.references import ReferenceImage, ReferenceImageError, load_reference_images
+from src.services.references import ReferenceImage, ReferenceImageError, _sniff_mime, load_reference_images
 
 logger = structlog.get_logger()
 
@@ -432,6 +432,111 @@ async def call_seedream_images(
     raise GenerationError(ErrorCode.NO_IMAGE_RETURNED, upstream_detail="no b64_json in Ark response")
 
 
+# Qwen-Image bills 1k and 2k output separately (3.0-pro: 0.25 vs 0.5 CNY); stay
+# within the 1k budget. Bailian accepts 512*512..2048*2048 total, ratio 1:8..8:1.
+QWEN_MAX_PIXELS = 1024 * 1024
+QWEN_SIZE_ALIGN = 16
+QWEN_MAX_RATIO = 8
+QWEN_DOWNLOAD_TIMEOUT = 60.0
+# Bailian moderation codes (DataInspectionFailed / data_inspection_failed for
+# input or output review, IPInfringementSuspect for suspected IP infringement).
+_QWEN_FILTER_MARKERS = ("DataInspection", "data_inspection", "IPInfringement")
+
+
+def _resolve_qwen_size(aspect_ratio: str | None, size: str | None) -> str:
+    """Largest ``WxH`` on the 16px grid that keeps the ratio within the 1k budget."""
+    aw, ah = _parse_ratio(aspect_ratio) or _parse_ratio(size) or (1, 1)
+    ratio = min(max(aw / ah, 1 / QWEN_MAX_RATIO), QWEN_MAX_RATIO)
+    height = math.sqrt(QWEN_MAX_PIXELS / ratio)
+    w = int(ratio * height) // QWEN_SIZE_ALIGN * QWEN_SIZE_ALIGN
+    h = int(height) // QWEN_SIZE_ALIGN * QWEN_SIZE_ALIGN
+    # Grid rounding can push an extreme ratio just past 8:1; clamp the long side.
+    w, h = min(w, QWEN_MAX_RATIO * h), min(h, QWEN_MAX_RATIO * w)
+    return f"{w}x{h}"
+
+
+def _qwen_http_error(resp: httpx.Response) -> GenerationError:
+    qwen_code, message = _upstream_error_fields(resp)
+    if not qwen_code:  # native DashScope shape: {"code": ..., "message": ...}
+        try:
+            body = resp.json()
+            qwen_code, message = str(body.get("code") or ""), str(body.get("message") or message)
+        except Exception:
+            pass
+    status = resp.status_code
+    filtered = any(marker in qwen_code or marker in message for marker in _QWEN_FILTER_MARKERS)
+    code = ErrorCode.CONTENT_FILTERED if filtered else _status_error_code(status)
+    return GenerationError(code, upstream_status=status, upstream_detail=f"{qwen_code}: {message}".strip(": "))
+
+
+async def call_qwen_images(
+    prompt: str,
+    model: str,
+    settings: Settings,
+    style: str | None = None,
+    http_client: httpx.AsyncClient | None = None,
+    aspect_ratio: str | None = None,
+    size: str | None = None,
+    reference_images: list[ReferenceImage] | None = None,
+) -> tuple[bytes, str]:
+    """Call Bailian's OpenAI-compatible images API for Qwen-Image; return (image_bytes, format).
+
+    Bailian only returns a 24-hour result URL (b64_json is ignored), so the image
+    is downloaded here and stored like any other generation.
+    """
+    if not settings.dashscope_api_key:
+        raise GenerationError(ErrorCode.CONFIG_MISSING, upstream_detail="DASHSCOPE_API_KEY is not configured")
+
+    content = prompt
+    if style:
+        content = f"{prompt}, style: {style}"
+
+    payload: dict[str, object] = {
+        "model": model,
+        "prompt": content,
+        "size": _resolve_qwen_size(aspect_ratio, size),
+        "n": 1,
+        "watermark": False,
+        # Keep the caller's prompt as written (and the cache meaningful): no rewriting.
+        "prompt_extend": False,
+    }
+    if reference_images:
+        uris = [ref.data_uri for ref in reference_images]
+        payload["image"] = uris[0] if len(uris) == 1 else uris
+
+    url = f"{settings.dashscope_base_url}/images/generations"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {settings.dashscope_api_key}"}
+    resp = await _post_with_retries(url, headers, payload, model=model, provider="dashscope", http_client=http_client)
+    if resp.status_code != 200:
+        raise _qwen_http_error(resp)
+
+    data = _json_body(resp, "dashscope")
+    _log_fields.get()["dashscope_usage"] = data.get("usage")
+    items = data.get("data") or []
+    image_url = items[0].get("url") if items and isinstance(items[0], dict) else None
+    if not image_url:
+        raise GenerationError(ErrorCode.NO_IMAGE_RETURNED, upstream_detail="no image url in DashScope response")
+
+    # The image already exists (and is billed); a failed download is not retried
+    # as a new generation.
+    try:
+        if http_client is not None:
+            result = await http_client.get(image_url, timeout=QWEN_DOWNLOAD_TIMEOUT)
+        else:
+            async with httpx.AsyncClient(timeout=QWEN_DOWNLOAD_TIMEOUT) as client:
+                result = await client.get(image_url)
+    except httpx.HTTPError as e:
+        raise GenerationError(
+            ErrorCode.UPSTREAM_UNAVAILABLE, upstream_detail=f"DashScope result download failed: {type(e).__name__}"
+        ) from None
+    mime = _sniff_mime(result.content) if result.status_code == 200 else None
+    if mime is None:
+        raise GenerationError(
+            ErrorCode.NO_IMAGE_RETURNED, upstream_detail=f"DashScope result download: HTTP {result.status_code}"
+        )
+    return result.content, mime.split("/")[1]
+
+
 def save_image(image_bytes: bytes, gen_id: str, fmt: str, storage_dir: str) -> str:
     """Save image to disk under its generation id and return the filename.
 
@@ -602,6 +707,17 @@ async def _call_model(
     """One upstream generation with ``model``; counts per-model duration and errors."""
     try:
         with GENERATION_DURATION.labels(model=model).time():
+            if SUPPORTED_MODELS[model].endpoint_type == "dashscope":
+                return await call_qwen_images(
+                    prompt=request.prompt,
+                    model=model,
+                    settings=settings,
+                    style=request.style,
+                    http_client=http_client,
+                    aspect_ratio=request.aspect_ratio,
+                    size=request.size,
+                    reference_images=references,
+                )
             if SUPPORTED_MODELS[model].endpoint_type == "images":
                 return await call_seedream_images(
                     prompt=request.prompt,

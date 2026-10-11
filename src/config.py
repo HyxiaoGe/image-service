@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-EndpointType = Literal["chat", "images"]
+EndpointType = Literal["chat", "images", "dashscope"]
 SearchType = Literal["web", "image"]
 
 
@@ -33,7 +33,7 @@ class ModelInfo:
         self.name = name
         self.provider = provider
         self.endpoint_type = endpoint_type
-        # None = any W:H ratio (Seedream maps it to explicit pixel dimensions).
+        # None = any W:H ratio (Seedream / Qwen-Image map it to explicit pixel dimensions).
         self.aspect_ratios = aspect_ratios
         # Google Search types the model accepts for grounding (verified via LiteLLM
         # on 2026-10-11). gemini-2.5-flash-image rejects search entirely ("Search as
@@ -123,6 +123,20 @@ SUPPORTED_MODELS: dict[str, ModelInfo] = {
         endpoint_type="images",
         ark_model_id="doubao-seedream-5-0-260128",
     ),
+    # Alibaba Bailian (DashScope OpenAI-compatible images API). API-only models;
+    # 1-3 reference images, any ratio from 1:8 to 8:1.
+    "qwen-image-3.0-pro": ModelInfo(
+        id="qwen-image-3.0-pro",
+        name="Qwen-Image 3.0 Pro",
+        provider="Alibaba",
+        endpoint_type="dashscope",
+    ),
+    "qwen-image-3.0": ModelInfo(
+        id="qwen-image-3.0",
+        name="Qwen-Image 3.0",
+        provider="Alibaba",
+        endpoint_type="dashscope",
+    ),
     # Both 4.x aliases run Settings.ark_model_id (4.5 by default).
     "doubao-seedream-4-5": ModelInfo(
         id="doubao-seedream-4-5",
@@ -175,6 +189,13 @@ class Settings(BaseSettings):
     ark_model_id: str = Field(
         "doubao-seedream-4-5-251128",
         description="Ark Seedream wire model id (version-pinned)",
+    )
+    dashscope_api_key: str = Field("", description="Alibaba Bailian (DashScope) API key (Qwen-Image)")
+    # The workspace host (https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1)
+    # is recommended by Alibaba; the legacy host below still works.
+    dashscope_base_url: str = Field(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        description="DashScope OpenAI-compatible base URL",
     )
 
     # Automatic reference search (reference_subject): Tavily key pool shared with

@@ -1,6 +1,6 @@
 # image-service
 
-AI image generation middleware. Wraps Google Gemini API behind a FastAPI REST + MCP interface with Redis caching, rate limiting, and Prometheus metrics.
+AI image generation middleware. Wraps Google Gemini, Volcengine Seedream and Alibaba Qwen-Image behind a FastAPI REST + MCP interface with Redis caching, rate limiting, and Prometheus metrics.
 
 ## Architecture
 
