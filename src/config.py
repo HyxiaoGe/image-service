@@ -163,9 +163,12 @@ class Settings(BaseSettings):
     # Main / backup models when the caller omits model / fallback_model. Switch
     # them by editing these env vars and restarting (see README).
     default_model: str = "gemini-nano-banana-2.1"
+    # Comma-separated backup chain, tried in order when the caller passes no
+    # fallback_model (see FALLBACK_CODES in generator for what triggers it).
     default_fallback_model: str | None = Field(
-        "doubao-seedream-5-0-pro",
-        description="Backup model on content_filtered when the caller passes no fallback_model; empty disables",
+        "doubao-seedream-5-0-pro,qwen-image-3.0",
+        description="Comma-separated backup models, tried in order when the caller passes no fallback_model; "
+        "empty disables",
     )
     redis_url: str = "redis://redis:6379/0"
     storage_dir: str = "storage/images"
@@ -207,8 +210,15 @@ class Settings(BaseSettings):
 
     @field_validator("default_fallback_model", mode="before")
     @classmethod
-    def _empty_fallback_is_none(cls, v: object) -> object:
-        return None if isinstance(v, str) and not v.strip() else v
+    def _normalize_fallback(cls, v: object) -> object:
+        if not isinstance(v, str):
+            return v
+        models = [m.strip() for m in v.split(",") if m.strip()]
+        return ",".join(models) or None
+
+    @property
+    def default_fallback_models(self) -> tuple[str, ...]:
+        return tuple(self.default_fallback_model.split(",")) if self.default_fallback_model else ()
 
     @model_validator(mode="after")
     def _check_default_models(self) -> Settings:
@@ -216,10 +226,12 @@ class Settings(BaseSettings):
         # every request after a typo in .env.
         if self.default_model not in SUPPORTED_MODELS:
             raise ValueError(f"DEFAULT_MODEL '{self.default_model}' is not a supported model")
-        fallback = self.default_fallback_model
-        if fallback is not None:
+        chain = self.default_fallback_models
+        for fallback in chain:
             if fallback not in SUPPORTED_MODELS:
                 raise ValueError(f"DEFAULT_FALLBACK_MODEL '{fallback}' is not a supported model")
             if fallback == self.default_model:
                 raise ValueError("DEFAULT_FALLBACK_MODEL must differ from DEFAULT_MODEL")
+        if len(set(chain)) != len(chain):
+            raise ValueError("DEFAULT_FALLBACK_MODEL lists a model twice")
         return self

@@ -104,7 +104,7 @@ python scripts/check_architecture.py                                  # 分层�
 | 环境变量 | 当前取值 | 作用 |
 |---|---|---|
 | `DEFAULT_MODEL` | `gemini-nano-banana-2.1` | 默认出图模型 |
-| `DEFAULT_FALLBACK_MODEL` | `doubao-seedream-5-0-pro` | 主模型被内容审核拦截（`content_filtered`）时换用的模型；留空表示不启用默认备用 |
+| `DEFAULT_FALLBACK_MODEL` | `doubao-seedream-5-0-pro,qwen-image-3.0` | 备用模型候选列表（逗号分隔，按顺序尝试）；留空表示不启用默认备用 |
 
 切换步骤（不需要改代码）：
 
@@ -120,17 +120,18 @@ curl -s localhost:8090/v1/health
 
 ```
 DEFAULT_MODEL=doubao-seedream-5-0-pro
-DEFAULT_FALLBACK_MODEL=gemini-nano-banana-2.1
+DEFAULT_FALLBACK_MODEL=gemini-nano-banana-2.1,qwen-image-3.0
 ```
 
 说明：
 
-- 两个值必须是 `GET /v1/models` 里的模型 ID，且不能相同；填错时服务启动失败，日志会写明是哪个变量。
-- 备用模型只在 `content_filtered` 时触发，只重试一次；超时、上游不可用等错误不换模型。
-- 默认备用模型不适用时会自动跳过，不报错：调用方选的模型恰好就是它，或者它不支持所请求的比例（例如 Seedream 主力请求 7:5，Gemini 备用不支持）。
-- 调用方传 `fallback_model: "none"` 可以关闭本次请求的备用。
-- 备用模型参与缓存 key，所以修改 `DEFAULT_FALLBACK_MODEL` 后，已有缓存不会再被命中，同样的请求会重新生成一次。
-- 返回里的 `model` 是实际出图的模型，`requested_model` 是请求的模型，`fallback_used` 表示是否走了备用。
+- 所有值必须是 `GET /v1/models` 里的模型 ID；备用列表不能包含 `DEFAULT_MODEL`，也不能重复。填错时服务启动失败，日志会写明是哪个变量。
+- 触发换下一个模型的情况：被内容审核拦截（`content_filtered`），或上游不可用（`upstream_unavailable`：429、5xx、连不上）。按列表顺序逐个尝试，某个成功就停；全部失败时返回最后一个模型的错误，`fallback_from` 写明主模型最初的失败原因。
+- 不换模型的情况：超时（再试一个模型很可能超出调用方的等待时间）、请求参数错误、连接在响应途中断开（上游可能已经出图并计费）。
+- 列表里不适用的模型会自动跳过，不报错：调用方选的模型恰好就是它，或者它不支持所请求的比例（例如 Seedream 主力请求 7:5，Gemini 备用不支持）。
+- 调用方传 `fallback_model` 时只用它这一个模型（同样的触发规则）；传 `"none"` 关闭本次请求的备用。
+- 备用列表参与缓存 key，所以修改 `DEFAULT_FALLBACK_MODEL` 后，已有缓存不会再被命中，同样的请求会重新生成一次。
+- 返回里的 `model` 是实际出图的模型，`requested_model` 是请求的模型，`fallback_used` 表示是否走了备用；日志 `fallback_tried` 记录依次失败的模型和原因。
 
 ## 支持的模型
 

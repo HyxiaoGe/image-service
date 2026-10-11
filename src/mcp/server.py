@@ -75,10 +75,11 @@ async def generate_image(
         aspect_ratio: Aspect ratio e.g. '16:9', '1:1'. Default '1:1'.
         size: Output dimensions as 'WxH'. Default '1024x1024'.
         style: Style hint e.g. 'watercolor', 'photorealistic' (optional).
-        fallback_model: Model to retry with once if `model`'s content filter blocks
-            the request. Omit to use the service's default backup model; pass
-            'none' to disable. Only content_filtered triggers it; the result's
-            "Model" line shows which model produced the image.
+        fallback_model: Model to retry with if `model`'s content filter blocks the
+            request or its provider is unavailable. Omit to use the service's
+            default backup models (tried in order); pass 'none' to disable.
+            Timeouts never fall back; the result's "Model" line shows which model
+            produced the image.
         grounding: Set true to let the model look things up with Google Search
             first, so recent products, landmarks and events are drawn accurately.
             Models without search support ignore it ("Grounding used" shows

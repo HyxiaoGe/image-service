@@ -52,6 +52,7 @@ class GenerationError(Exception):
         upstream_detail: str | None = None,
         fields: list[str] | None = None,
         fallback_from: dict[str, str] | None = None,
+        maybe_billed: bool = False,
     ):
         spec = ERROR_SPECS[code]
         self.code = code
@@ -62,7 +63,10 @@ class GenerationError(Exception):
         self.upstream_status = upstream_status
         self.upstream_detail = upstream_detail[:500] if upstream_detail else None
         self.fields = fields
-        self.fallback_from = fallback_from  # set when the fallback model also failed
+        self.fallback_from = fallback_from  # set when every fallback model also failed
+        # The upstream may already have produced (and billed) an image, e.g. the
+        # connection dropped mid-response: never retried on another model.
+        self.maybe_billed = maybe_billed
         super().__init__(self.message)
 
 
@@ -207,6 +211,7 @@ async def _post_with_retries(
             raise GenerationError(
                 ErrorCode.UPSTREAM_UNAVAILABLE,
                 upstream_detail=f"{provider} transport error: {type(e).__name__}",
+                maybe_billed=True,
             ) from None
     assert resp is not None  # loop always breaks with resp set or raises
     return resp
@@ -538,7 +543,9 @@ async def call_qwen_images(
                 result = await client.get(image_url)
     except httpx.HTTPError as e:
         raise GenerationError(
-            ErrorCode.UPSTREAM_UNAVAILABLE, upstream_detail=f"DashScope result download failed: {type(e).__name__}"
+            ErrorCode.UPSTREAM_UNAVAILABLE,
+            upstream_detail=f"DashScope result download failed: {type(e).__name__}",
+            maybe_billed=True,
         ) from None
     mime = _sniff_mime(result.content) if result.status_code == 200 else None
     if mime is None:
@@ -668,24 +675,25 @@ def _validate(request: GenerateRequest, model: str) -> None:
 NO_FALLBACK = "none"
 
 
-def _resolve_fallback(request: GenerateRequest, model: str, settings: Settings) -> tuple[str | None, str]:
-    """Effective fallback model and where it came from ("request", "default" or "none").
+def _resolve_fallback(request: GenerateRequest, model: str, settings: Settings) -> tuple[list[str], str]:
+    """Effective fallback chain and where it came from ("request", "default" or "none").
 
-    An explicit fallback_model is validated strictly (invalid_params on mistakes).
-    The configured default applies only where it can work: it is skipped, not
-    rejected, when it equals the chosen model or can't do the requested ratio.
+    An explicit fallback_model is validated strictly (invalid_params on mistakes)
+    and is the whole chain. Each configured default applies only where it can
+    work: it is skipped, not rejected, when it equals the chosen model or can't
+    do the requested ratio.
     """
     fallback = request.fallback_model
     if fallback == NO_FALLBACK:
-        return None, "none"
+        return [], "none"
     if fallback is None:
-        default = settings.default_fallback_model
-        if default is None or default == model:
-            return None, "none"
-        allowed = SUPPORTED_MODELS[default].aspect_ratios
-        if allowed is not None and request.aspect_ratio not in allowed:
-            return None, "none"
-        return default, "default"
+        chain = [
+            m
+            for m in settings.default_fallback_models
+            if m != model
+            and (SUPPORTED_MODELS[m].aspect_ratios is None or request.aspect_ratio in SUPPORTED_MODELS[m].aspect_ratios)
+        ]
+        return chain, "default" if chain else "none"
     if fallback not in SUPPORTED_MODELS:
         raise GenerationError(
             ErrorCode.INVALID_PARAMS,
@@ -700,7 +708,7 @@ def _resolve_fallback(request: GenerateRequest, model: str, settings: Settings) 
         )
     # Checked up front so a fallback can't fail on a ratio we already know it rejects.
     _check_aspect_ratio(fallback, request.aspect_ratio, "fallback_model")
-    return fallback, "request"
+    return [fallback], "request"
 
 
 def _grounding_applies(request: GenerateRequest, model: str) -> bool:
@@ -812,34 +820,56 @@ async def _find_references(
     return outcome
 
 
+# Failures that move on to the next model: a moderation block, or the provider
+# being down (429 / 5xx / unreachable). Timeouts don't: another full attempt
+# would blow the caller's time budget.
+FALLBACK_CODES = frozenset({ErrorCode.CONTENT_FILTERED, ErrorCode.UPSTREAM_UNAVAILABLE})
+
+
+def _falls_back(e: GenerationError) -> bool:
+    return e.code in FALLBACK_CODES and not e.maybe_billed
+
+
 async def _generate_with_fallback(
     request: GenerateRequest,
     model: str,
-    fallback: str | None,
+    fallbacks: list[str],
     settings: Settings,
     http_client: httpx.AsyncClient | None,
     references: list[ReferenceImage],
 ) -> tuple[bytes, str, str]:
-    """Generate with ``model``; on content_filtered only, try ``fallback`` once.
+    """Generate with ``model``, then each of ``fallbacks`` in order while failures qualify.
 
-    Returns (image bytes, format, model that produced the image).
+    Returns (image bytes, format, model that produced the image). If every model
+    fails, the last error is raised with ``fallback_from`` naming the primary
+    model's failure.
     """
     try:
         image_bytes, fmt = await _call_model(request, model, settings, http_client, references)
         return image_bytes, fmt, model
     except GenerationError as e:
-        if fallback is None or e.code != ErrorCode.CONTENT_FILTERED:
+        if not fallbacks or not _falls_back(e):
             raise
+        first_failure = {"model": model, "code": e.code.value}
 
-    logger.info("fallback_started", from_model=model, to_model=fallback)
-    try:
-        image_bytes, fmt = await _call_model(request, fallback, settings, http_client, references)
-    except GenerationError as e:
-        FALLBACKS.labels(from_model=model, to_model=fallback, outcome="error").inc()
-        e.fallback_from = {"model": model, "code": ErrorCode.CONTENT_FILTERED.value}
-        raise
-    FALLBACKS.labels(from_model=model, to_model=fallback, outcome="success").inc()
-    return image_bytes, fmt, fallback
+    tried: list[dict[str, str]] = [first_failure]
+    _log_fields.get()["fallback_tried"] = tried
+    previous = model
+    for i, fallback in enumerate(fallbacks):
+        logger.info("fallback_started", from_model=previous, to_model=fallback, reason=tried[-1]["code"])
+        try:
+            image_bytes, fmt = await _call_model(request, fallback, settings, http_client, references)
+        except GenerationError as e:
+            FALLBACKS.labels(from_model=model, to_model=fallback, outcome="error").inc()
+            tried.append({"model": fallback, "code": e.code.value})
+            if i == len(fallbacks) - 1 or not _falls_back(e):
+                e.fallback_from = first_failure
+                raise
+            previous = fallback
+            continue
+        FALLBACKS.labels(from_model=model, to_model=fallback, outcome="success").inc()
+        return image_bytes, fmt, fallback
+    raise AssertionError("unreachable: the loop returns or raises")
 
 
 async def _generate(
@@ -851,8 +881,10 @@ async def _generate(
 ) -> GenerateResponse:
     """Orchestrate generation: validate → cache check → generate (with fallback) → save → cache set."""
     _validate(request, model)
-    fallback, fallback_source = _resolve_fallback(request, model, settings)
-    _log_fields.get().update(fallback_model=fallback, fallback_source=fallback_source)
+    fallbacks, fallback_source = _resolve_fallback(request, model, settings)
+    # One model logs and keys exactly as before the chain existed.
+    fallback_key = ",".join(fallbacks) or None
+    _log_fields.get().update(fallback_model=fallback_key, fallback_source=fallback_source)
 
     cache_key = compute_cache_key(
         request.prompt,
@@ -860,7 +892,7 @@ async def _generate(
         request.aspect_ratio,
         request.size,
         request.style,
-        fallback,
+        fallback_key,
         request.grounding,
         request.reference_images,
         request.reference_subject,
@@ -908,7 +940,7 @@ async def _generate(
                 accepted=outcome.accepted,
             )
         image_bytes, fmt, actual_model = await _generate_with_fallback(
-            upstream_request, model, fallback, settings, http_client, references
+            upstream_request, model, fallbacks, settings, http_client, references
         )
 
         grounding_used = _grounding_applies(request, actual_model)

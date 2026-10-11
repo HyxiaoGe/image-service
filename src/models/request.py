@@ -17,9 +17,9 @@ class GenerateRequest(BaseModel):
     style: str | None = Field(None, description="Style hint e.g. watercolor")
     fallback_model: str | None = Field(
         None,
-        description="Model to retry with once if the primary model's content filter blocks the request. "
-        "Omitted: the service's DEFAULT_FALLBACK_MODEL. 'none': no fallback. "
-        "Other failures never fall back.",
+        description="Model to retry with if the primary model's content filter blocks the request or its "
+        "provider is unavailable. Omitted: the service's DEFAULT_FALLBACK_MODEL chain, tried in order. "
+        "'none': no fallback. Timeouts and other failures never fall back.",
     )
     grounding: bool = Field(
         False,

@@ -1,7 +1,8 @@
-"""fallback_model: opt-in, only on content_filtered, reported in the result."""
+"""fallback_model: opt-in, on content_filtered / upstream_unavailable, reported in the result."""
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from fastmcp import Client
 
@@ -9,6 +10,10 @@ from src.services import generator
 
 GEMINI = "gemini-3-pro-image-preview"  # default model in tests
 SEEDREAM = "doubao-seedream-4-5"
+
+
+async def _no_sleep(_seconds):
+    return None
 
 
 async def post(client, **body):
@@ -36,12 +41,45 @@ async def test_no_fallback_without_opt_in(client, routing):
 
 
 @pytest.mark.asyncio
-async def test_other_errors_do_not_fall_back(client, routing, monkeypatch):
-    routing.gemini = (503, {"error": {"message": "overloaded"}})
+@pytest.mark.parametrize("status", [429, 503])
+async def test_unavailable_primary_falls_back(client, routing, status):
+    routing.gemini = (status, {"error": {"message": "overloaded"}})
+
+    data = (await post(client, fallback_model=SEEDREAM)).json()
+
+    assert data["model"] == SEEDREAM
+    assert data["fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_unreachable_primary_falls_back(client, routing, monkeypatch):
+    monkeypatch.setattr(generator.asyncio, "sleep", _no_sleep)
+    routing.gemini = httpx.ConnectError("refused")
+
+    data = (await post(client, fallback_model=SEEDREAM)).json()
+
+    assert data["model"] == SEEDREAM
+    assert routing.calls["gemini"] == 3  # its own connect retries first
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "code"),
+    [
+        (httpx.ReadTimeout("slow"), "upstream_timeout"),
+        # Dropped mid-response: the image may already be billed.
+        (httpx.RemoteProtocolError("dropped"), "upstream_unavailable"),
+        ((400, {"error": {"message": "bad request"}}), "upstream_error"),
+    ],
+    ids=["timeout", "transport-error", "400"],
+)
+async def test_other_errors_do_not_fall_back(client, routing, monkeypatch, answer, code):
+    monkeypatch.setattr(generator.asyncio, "sleep", _no_sleep)
+    routing.gemini = answer
 
     resp = await post(client, fallback_model=SEEDREAM)
 
-    assert resp.json()["error"] == "upstream_unavailable"
+    assert resp.json()["error"] == code
     assert resp.json()["model"] == GEMINI
     assert routing.calls["ark"] == 0
 
