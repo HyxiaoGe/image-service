@@ -63,6 +63,7 @@ DEFAULT_FALLBACK_MODEL=gemini-nano-banana-2.1
 
 - 最多 3 张，每张不超过 4 MB，支持 PNG、JPEG、WebP。服务会下载这些图，再以 base64 内联的方式传给上游：3 × 4 MB 编码后约 16 MB，在 Gemini 单次请求 20 MB 的内联上限以内。每多一张图，请求就多一次下载和更大的上游请求。
 - 只接受公网的 http(s) 地址。指向内网、本机或链路本地地址的 URL 会被拒绝，重定向的每一跳都会检查。
+- 服务器走 fake-ip DNS 代理（如 Clash）时，本地解析结果是 `198.18.0.0/15`，这时会改用 DNS-over-HTTPS（Cloudflare）查询真实 IP 再判断；DoH 失败或超时一律拒绝。本地解析出真实 IP 时不额外查询。
 - 本服务生成的图片 URL（`SERVICE_BASE_URL` + `/static/images/...`）直接从本地存储读取，不走网络。
 - 下载失败、拿到的不是图片（例如网页）、超过大小上限时，返回 `invalid_params`，`fields=["reference_images"]`，message 会写明是第几张、什么原因。
 - 参考图 URL 会计入缓存 key。同一个 URL 背后的图片如果换了，缓存过期前会一直返回旧结果，需要重新生成时传 `no_cache: true`。
