@@ -23,6 +23,7 @@ class ModelInfo:
         provider: str,
         endpoint_type: EndpointType = "chat",
         aspect_ratios: tuple[str, ...] | None = None,
+        grounding: bool = False,
     ) -> None:
         self.id = id
         self.name = name
@@ -30,6 +31,9 @@ class ModelInfo:
         self.endpoint_type = endpoint_type
         # None = any W:H ratio (Seedream maps it to explicit pixel dimensions).
         self.aspect_ratios = aspect_ratios
+        # Accepts the Google Search tool (verified via LiteLLM on 2026-10-11;
+        # gemini-2.5-flash-image answers 400 "Search as tool is not enabled").
+        self.grounding = grounding
 
 
 SUPPORTED_MODELS: dict[str, ModelInfo] = {
@@ -38,18 +42,21 @@ SUPPORTED_MODELS: dict[str, ModelInfo] = {
         name="Nano Banana Pro",
         provider="Google",
         aspect_ratios=GEMINI_ASPECT_RATIOS,
+        grounding=True,
     ),
     "gemini-3-pro-image-preview": ModelInfo(
         id="gemini-3-pro-image-preview",
         name="Gemini 3 Pro Image",
         provider="Google",
         aspect_ratios=GEMINI_ASPECT_RATIOS,
+        grounding=True,
     ),
     "gemini-3.1-flash-image-preview": ModelInfo(
         id="gemini-3.1-flash-image-preview",
         name="Gemini 3.1 Flash Image",
         provider="Google",
         aspect_ratios=GEMINI_FLASH_31_ASPECT_RATIOS,
+        grounding=True,
     ),
     "gemini-2.5-flash-image": ModelInfo(
         id="gemini-2.5-flash-image",

@@ -62,6 +62,7 @@ async def generate_image(
     size: str = "1024x1024",
     style: str | None = None,
     fallback_model: str | None = None,
+    grounding: bool = False,
     no_cache: bool = False,
 ) -> ToolResult:
     """Generate an image from a text prompt via the image-service backend.
@@ -75,6 +76,10 @@ async def generate_image(
         fallback_model: Model to retry with once if `model`'s content filter blocks
             the request (optional, off by default). Only content_filtered triggers
             it; the result's "Model" line shows which model produced the image.
+        grounding: Set true to let the model look things up with Google Search
+            first, so recent products, landmarks and events are drawn accurately.
+            Models without search support ignore it ("Grounding used" shows
+            whether it applied).
         no_cache: Set true to regenerate: skip the cached image for identical
             parameters and produce a new one (it then replaces the cache entry).
 
@@ -92,6 +97,7 @@ async def generate_image(
             size=size,
             style=style,
             fallback_model=fallback_model,
+            grounding=grounding,
             no_cache=no_cache,
         )
     except ValidationError as e:
@@ -116,6 +122,7 @@ async def generate_image(
         f"ID: {result.id}",
         f"Requested model: {result.requested_model}",
         f"Fallback used: {result.fallback_used}",
+        f"Grounding used: {result.grounding_used}",
     ]
     return ToolResult(
         content="\n".join(lines),
@@ -125,6 +132,7 @@ async def generate_image(
             "model": result.model,
             "requested_model": result.requested_model,
             "fallback_used": result.fallback_used,
+            "grounding_used": result.grounding_used,
             "cached": result.cached,
             "id": result.id,
         },
@@ -137,5 +145,8 @@ async def list_models() -> str:
     lines = ["Available models:", ""]
     for i, model_info in enumerate(SUPPORTED_MODELS.values(), 1):
         ratios = ", ".join(model_info.aspect_ratios) if model_info.aspect_ratios else "any W:H"
-        lines.append(f"{i}. {model_info.name} ({model_info.id}) — {model_info.provider} — aspect ratios: {ratios}")
+        lines.append(
+            f"{i}. {model_info.name} ({model_info.id}) — {model_info.provider} — aspect ratios: {ratios}"
+            + (" — grounding" if model_info.grounding else "")
+        )
     return "\n".join(lines)

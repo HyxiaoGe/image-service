@@ -16,6 +16,12 @@ class GenerateRequest(BaseModel):
         description="Model to retry with once if the primary model's content filter blocks the request. "
         "Off by default; other failures never fall back.",
     )
+    grounding: bool = Field(
+        False,
+        description="Let the model use Google Search (incl. image search) to draw recent products, "
+        "places and events accurately. Ignored by models without search support; "
+        "see grounding_used in the response.",
+    )
     no_cache: bool = Field(
         False,
         description="Skip the cache and generate a new image (e.g. regenerate). The result still replaces the cache entry.",

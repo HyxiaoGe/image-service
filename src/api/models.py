@@ -16,6 +16,7 @@ async def list_models() -> ModelsListResponse:
             name=m.name,
             provider=m.provider,
             aspect_ratios=list(m.aspect_ratios) if m.aspect_ratios is not None else None,
+            grounding=m.grounding,
         )
         for m in SUPPORTED_MODELS.values()
     ]

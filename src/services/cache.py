@@ -28,17 +28,20 @@ def compute_cache_key(
     size: str,
     style: str | None = None,
     fallback_model: str | None = None,
+    grounding: bool = False,
 ) -> str:
     """Compute SHA-256 cache key from normalized generation parameters.
 
     fallback_model is part of the key so a fallback result is never served to a
-    caller that did not opt in; it is appended only when set, keeping keys for
-    plain requests unchanged.
+    caller that did not opt in. Same for grounding. Both are appended only when
+    set, keeping keys for plain requests unchanged.
     """
     style_part = (style or "").strip().lower()
     raw = f"{CACHE_KEY_VERSION}:{prompt.strip().lower()}:{model.lower()}:{aspect_ratio}:{size}:{style_part}"
     if fallback_model:
         raw += f":fallback={fallback_model.lower()}"
+    if grounding:
+        raw += ":grounding"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 

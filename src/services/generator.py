@@ -72,6 +72,12 @@ LOCK_TTL_SECONDS = int(REQUEST_TIMEOUT * (MAX_RETRIES + 1)) + 60
 # summary log in handle_generate.
 _upstream_attempts: ContextVar[int] = ContextVar("upstream_attempts", default=0)
 
+# What Google Search did for the current request (queries, source count), when
+# grounding was on; read by the summary log.
+_search_stats: ContextVar[dict[str, object] | None] = ContextVar("search_stats", default=None)
+
+GOOGLE_SEARCH_TOOL = {"googleSearch": {}}
+
 # Markers Gemini uses for safety blocks (blockReason / finishReason values) when
 # they surface as an HTTP error instead of a 200 with finish_reason=content_filter.
 _GEMINI_SAFETY_MARKERS = ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST")
@@ -249,6 +255,20 @@ def _ark_http_error(resp: httpx.Response) -> GenerationError:
     return GenerationError(code, upstream_status=status, upstream_detail=f"{ark_code}: {message}".strip(": "))
 
 
+def _search_summary(data: dict) -> dict[str, object]:
+    """Search queries / source count from LiteLLM's Gemini grounding metadata, for logs."""
+    queries: list[str] = []
+    sources = 0
+    for meta in data.get("vertex_ai_grounding_metadata") or []:
+        if isinstance(meta, dict):
+            queries += meta.get("webSearchQueries") or []
+            queries += meta.get("imageSearchQueries") or []
+            sources += len(meta.get("groundingChunks") or [])
+    usage = data.get("usage") or {}
+    requests = (usage.get("prompt_tokens_details") or {}).get("web_search_requests") or 0
+    return {"search_queries": queries, "search_sources": sources, "search_requests": requests}
+
+
 async def call_gemini(
     prompt: str,
     model: str,
@@ -256,6 +276,7 @@ async def call_gemini(
     style: str | None = None,
     http_client: httpx.AsyncClient | None = None,
     aspect_ratio: str | None = None,
+    grounding: bool = False,
 ) -> tuple[bytes, str]:
     """Call LiteLLM Proxy (OpenAI-compatible chat+modalities) and return (image_bytes, format_ext)."""
     content = prompt
@@ -274,6 +295,10 @@ async def call_gemini(
     if aspect_ratio:
         # LiteLLM forwards a top-level imageConfig to Gemini's generationConfig.
         payload["imageConfig"] = {"aspectRatio": aspect_ratio}
+    if grounding:
+        # LiteLLM maps this to Gemini's google_search tool. The model still
+        # decides whether to search; _search_stats records what it did.
+        payload["tools"] = [GOOGLE_SEARCH_TOOL]
 
     url = f"{settings.litellm_base_url}/v1/chat/completions"
     headers = {
@@ -287,6 +312,8 @@ async def call_gemini(
         raise _gemini_http_error(resp)
 
     data = _json_body(resp, "litellm")
+    if grounding:
+        _search_stats.set(_search_summary(data))
     choices = data.get("choices") or []
     if not choices:
         raise GenerationError(ErrorCode.NO_IMAGE_RETURNED, upstream_detail="no choices in LiteLLM response")
@@ -377,6 +404,7 @@ def _cached_response(cached: dict, requested_model: str) -> GenerateResponse:
         model=cached["model"],
         requested_model=requested_model,
         fallback_used=cached["model"] != requested_model,
+        grounding_used=cached.get("grounding_used", False),
         cached=True,
         created_at=cached["created_at"],
     )
@@ -392,6 +420,7 @@ async def handle_generate(
     """Generate (or fetch from cache) and emit one ``generation_finished`` summary log."""
     started = time.perf_counter()
     _upstream_attempts.set(0)
+    _search_stats.set(None)
     requested_model = request.model or settings.default_model
     fields: dict[str, object] = {
         "request_id": str(uuid.uuid4()),
@@ -400,6 +429,7 @@ async def handle_generate(
         "aspect_ratio": request.aspect_ratio,
         "size": request.size,
         "fallback_model": request.fallback_model,
+        "grounding": request.grounding,
         "no_cache": request.no_cache,
         "prompt_len": len(request.prompt),
         "prompt_sha8": hashlib.sha256(request.prompt.encode()).hexdigest()[:8],
@@ -426,6 +456,7 @@ async def handle_generate(
             upstream_status=e.upstream_status,
             upstream_detail=e.upstream_detail,
             fallback_from=e.fallback_from,
+            **(_search_stats.get() or {}),
         )
         raise
     except Exception:
@@ -436,7 +467,9 @@ async def handle_generate(
         outcome="cached" if result.cached else "success",
         model=result.model,
         fallback_used=result.fallback_used,
+        grounding_used=result.grounding_used,
         id=result.id,
+        **(_search_stats.get() or {}),
     )
     return result
 
@@ -480,6 +513,11 @@ def _validate(request: GenerateRequest, model: str) -> None:
     _check_aspect_ratio(fallback, request.aspect_ratio, "fallback_model")
 
 
+def _grounding_applies(request: GenerateRequest, model: str) -> bool:
+    """grounding is a request; models without search support silently ignore it."""
+    return request.grounding and SUPPORTED_MODELS[model].grounding
+
+
 async def _call_model(
     request: GenerateRequest,
     model: str,
@@ -506,6 +544,7 @@ async def _call_model(
                 style=request.style,
                 http_client=http_client,
                 aspect_ratio=request.aspect_ratio,
+                grounding=_grounding_applies(request, model),
             )
     except GenerationError as e:
         e.model = e.model or model
@@ -553,7 +592,13 @@ async def _generate(
     _validate(request, model)
 
     cache_key = compute_cache_key(
-        request.prompt, model, request.aspect_ratio, request.size, request.style, request.fallback_model
+        request.prompt,
+        model,
+        request.aspect_ratio,
+        request.size,
+        request.style,
+        request.fallback_model,
+        request.grounding,
     )
 
     lock_token: str | None = None
@@ -577,6 +622,7 @@ async def _generate(
     try:
         image_bytes, fmt, actual_model = await _generate_with_fallback(request, model, settings, http_client)
 
+        grounding_used = _grounding_applies(request, actual_model)
         gen_id = str(uuid.uuid4())
         filename = save_image(image_bytes, gen_id, fmt, settings.storage_dir)
 
@@ -587,6 +633,7 @@ async def _generate(
             "id": gen_id,
             "image_url": image_url,
             "model": actual_model,
+            "grounding_used": grounding_used,
             "created_at": created_at,
         }
         await cache.set_cached(cache_key, metadata)
@@ -598,6 +645,7 @@ async def _generate(
             model=actual_model,
             requested_model=model,
             fallback_used=actual_model != model,
+            grounding_used=grounding_used,
             cached=False,
             created_at=created_at,
         )

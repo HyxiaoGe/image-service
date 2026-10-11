@@ -9,6 +9,7 @@ class GenerateResponse(BaseModel):
     model: str  # model that actually produced the image
     requested_model: str  # model the caller asked for (or the default)
     fallback_used: bool = False
+    grounding_used: bool = False  # search tool was enabled for the model that produced the image
     cached: bool
     created_at: str
 
@@ -17,7 +18,8 @@ class ModelInfoResponse(BaseModel):
     id: str
     name: str
     provider: str
-    aspect_ratios: list[str] | None = None  # None = any W:H ratio
+    aspect_ratios: list[str] | None = None
+    grounding: bool = False  # supports the grounding (Google Search) option  # None = any W:H ratio
 
 
 class ModelsListResponse(BaseModel):
