@@ -469,6 +469,15 @@ def _qwen_http_error(resp: httpx.Response) -> GenerationError:
     return GenerationError(code, upstream_status=status, upstream_detail=f"{qwen_code}: {message}".strip(": "))
 
 
+def _qwen_image_url(data: dict) -> str | None:
+    """``output.choices[0].message.content[*].image`` from a DashScope sync response."""
+    try:
+        content = data["output"]["choices"][0]["message"]["content"]
+        return next((part["image"] for part in content if isinstance(part, dict) and part.get("image")), None)
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 async def call_qwen_images(
     prompt: str,
     model: str,
@@ -479,10 +488,12 @@ async def call_qwen_images(
     size: str | None = None,
     reference_images: list[ReferenceImage] | None = None,
 ) -> tuple[bytes, str]:
-    """Call Bailian's OpenAI-compatible images API for Qwen-Image; return (image_bytes, format).
+    """Call Bailian's native DashScope sync API for Qwen-Image; return (image_bytes, format).
 
-    Bailian only returns a 24-hour result URL (b64_json is ignored), so the image
-    is downloaded here and stored like any other generation.
+    The OpenAI-compatible images route only exists on per-workspace hosts (the
+    legacy dashscope.aliyuncs.com host answers 404), while this native route works
+    on both. Bailian only returns a 24-hour result URL, so the image is downloaded
+    here and stored like any other generation.
     """
     if not settings.dashscope_api_key:
         raise GenerationError(ErrorCode.CONFIG_MISSING, upstream_detail="DASHSCOPE_API_KEY is not configured")
@@ -491,20 +502,21 @@ async def call_qwen_images(
     if style:
         content = f"{prompt}, style: {style}"
 
+    parts: list[dict[str, str]] = [{"image": ref.data_uri} for ref in reference_images or []]
+    parts.append({"text": content})
     payload: dict[str, object] = {
         "model": model,
-        "prompt": content,
-        "size": _resolve_qwen_size(aspect_ratio, size),
-        "n": 1,
-        "watermark": False,
-        # Keep the caller's prompt as written (and the cache meaningful): no rewriting.
-        "prompt_extend": False,
+        "input": {"messages": [{"role": "user", "content": parts}]},
+        "parameters": {
+            "size": _resolve_qwen_size(aspect_ratio, size).replace("x", "*"),
+            "n": 1,
+            "watermark": False,
+            # Keep the caller's prompt as written (and the cache meaningful): no rewriting.
+            "prompt_extend": False,
+        },
     }
-    if reference_images:
-        uris = [ref.data_uri for ref in reference_images]
-        payload["image"] = uris[0] if len(uris) == 1 else uris
 
-    url = f"{settings.dashscope_base_url}/images/generations"
+    url = f"{settings.dashscope_base_url}/services/aigc/multimodal-generation/generation"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {settings.dashscope_api_key}"}
     resp = await _post_with_retries(url, headers, payload, model=model, provider="dashscope", http_client=http_client)
     if resp.status_code != 200:
@@ -512,8 +524,7 @@ async def call_qwen_images(
 
     data = _json_body(resp, "dashscope")
     _log_fields.get()["dashscope_usage"] = data.get("usage")
-    items = data.get("data") or []
-    image_url = items[0].get("url") if items and isinstance(items[0], dict) else None
+    image_url = _qwen_image_url(data)
     if not image_url:
         raise GenerationError(ErrorCode.NO_IMAGE_RETURNED, upstream_detail="no image url in DashScope response")
 

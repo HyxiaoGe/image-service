@@ -1,4 +1,4 @@
-"""Qwen-Image via Bailian's OpenAI-compatible images API (URL-only results)."""
+"""Qwen-Image via Bailian's native DashScope sync API (URL-only results)."""
 
 from __future__ import annotations
 
@@ -20,11 +20,20 @@ RESULT_URL = "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/out.png?Ex
 DASHSCOPE_HOST = "dashscope.aliyuncs.com"
 
 
+def success(url: str) -> dict:
+    message = {"role": "assistant", "content": [{"image": url}]}
+    return {
+        "output": {"choices": [{"finish_reason": "stop", "message": message}]},
+        "usage": {"output_image_count": 1, "output_image_type": "qima_output_1k"},
+        "request_id": "r1",
+    }
+
+
 class Bailian(httpx.AsyncBaseTransport):
     """DashScope generation, its result URL, and caller reference images."""
 
     def __init__(self):
-        self.generation: tuple[int, dict] = (200, {"data": [{"url": RESULT_URL}], "usage": {"output_image_count": 1}})
+        self.generation: tuple[int, dict] = (200, success(RESULT_URL))
         self.result = httpx.Response(200, content=PNG)
         self.requests: list[httpx.Request] = []
 
@@ -37,7 +46,7 @@ class Bailian(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if request.url.host == DASHSCOPE_HOST:
-            assert request.url.path == "/compatible-mode/v1/images/generations"
+            assert request.url.path == "/api/v1/services/aigc/multimodal-generation/generation"
             status, body = self.generation
             return httpx.Response(status, json=body)
         if str(request.url) == RESULT_URL:
@@ -77,11 +86,8 @@ async def test_generates_downloads_and_stores(client, bailian, settings):
     sent = bailian.sent()[0]
     assert sent == {
         "model": QWEN,
-        "prompt": "新品发布海报",
-        "size": "1360x768",
-        "n": 1,
-        "watermark": False,
-        "prompt_extend": False,
+        "input": {"messages": [{"role": "user", "content": [{"text": "新品发布海报"}]}]},
+        "parameters": {"size": "1360*768", "n": 1, "watermark": False, "prompt_extend": False},
     }
     assert bailian.requests[0].headers["authorization"] == "Bearer dk"
     assert bailian.downloads() == 1
@@ -95,7 +101,8 @@ async def test_generates_downloads_and_stores(client, bailian, settings):
 async def test_reference_image_is_a_data_uri(client, bailian):
     resp = await post(client, reference_images=["https://img.example.com/a.png"])
     assert resp.status_code == 200, resp.text
-    assert bailian.sent()[0]["image"] == f"data:image/png;base64,{FAKE_PNG_B64}"
+    content = bailian.sent()[0]["input"]["messages"][0]["content"]
+    assert content == [{"image": f"data:image/png;base64,{FAKE_PNG_B64}"}, {"text": "新品发布海报"}]
 
 
 @pytest.mark.asyncio
@@ -111,7 +118,7 @@ async def test_missing_key_is_config_missing(client, app, bailian):
 @pytest.mark.parametrize(
     "body",
     [
-        {"error": {"code": "DataInspectionFailed", "message": "Input data may contain inappropriate content."}},
+        {"code": "DataInspectionFailed", "message": "Input data may contain inappropriate content."},
         {"code": "IPInfringementSuspect", "message": "Input data is suspected of being involved in IP infringement."},
     ],
 )
@@ -124,14 +131,14 @@ async def test_moderation_is_content_filtered(client, bailian, body):
 
 @pytest.mark.asyncio
 async def test_other_400_is_upstream_error(client, bailian):
-    bailian.generation = (400, {"error": {"code": "InvalidParameter", "message": "size is invalid"}})
+    bailian.generation = (400, {"code": "InvalidParameter", "message": "size is invalid"})
     resp = await post(client)
     assert resp.json()["error"] == "upstream_error"
 
 
 @pytest.mark.asyncio
 async def test_missing_url_is_no_image(client, bailian):
-    bailian.generation = (200, {"data": []})
+    bailian.generation = (200, {"output": {"choices": []}})
     resp = await post(client)
     assert resp.json()["error"] == "no_image_returned"
 

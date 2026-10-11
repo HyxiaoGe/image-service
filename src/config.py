@@ -191,11 +191,11 @@ class Settings(BaseSettings):
         description="Ark Seedream wire model id (version-pinned)",
     )
     dashscope_api_key: str = Field("", description="Alibaba Bailian (DashScope) API key (Qwen-Image)")
-    # The workspace host (https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1)
-    # is recommended by Alibaba; the legacy host below still works.
+    # Native DashScope API root. Alibaba recommends the workspace host
+    # (https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1); the legacy host still works.
     dashscope_base_url: str = Field(
-        "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        description="DashScope OpenAI-compatible base URL",
+        "https://dashscope.aliyuncs.com/api/v1",
+        description="DashScope native API base URL",
     )
 
     # Automatic reference search (reference_subject): Tavily key pool shared with
