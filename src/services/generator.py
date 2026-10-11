@@ -76,6 +76,10 @@ _upstream_attempts: ContextVar[int] = ContextVar("upstream_attempts", default=0)
 # grounding was on; read by the summary log.
 _search_stats: ContextVar[dict[str, object] | None] = ContextVar("search_stats", default=None)
 
+# Summary-log fields of the current request, so deeper steps can add what they
+# resolve (e.g. the effective fallback model).
+_log_fields: ContextVar[dict[str, object]] = ContextVar("log_fields")
+
 
 def _google_search_tool(search_types: tuple[str, ...]) -> dict:
     """Gemini googleSearch tool. Without searchTypes Gemini only does web search;
@@ -446,12 +450,15 @@ async def handle_generate(
         "requested_model": requested_model,
         "aspect_ratio": request.aspect_ratio,
         "size": request.size,
-        "fallback_model": request.fallback_model,
         "grounding": request.grounding,
         "no_cache": request.no_cache,
         "prompt_len": len(request.prompt),
         "prompt_sha8": hashlib.sha256(request.prompt.encode()).hexdigest()[:8],
+        # Overwritten with the effective value once validation passes.
+        "fallback_model": request.fallback_model,
+        "fallback_source": None,
     }
+    _log_fields.set(fields)
 
     def finish(level: str, **extra: object) -> None:
         getattr(logger, level)(
@@ -512,9 +519,28 @@ def _validate(request: GenerateRequest, model: str) -> None:
         )
     _check_aspect_ratio(model, request.aspect_ratio, "aspect_ratio")
 
+
+NO_FALLBACK = "none"
+
+
+def _resolve_fallback(request: GenerateRequest, model: str, settings: Settings) -> tuple[str | None, str]:
+    """Effective fallback model and where it came from ("request", "default" or "none").
+
+    An explicit fallback_model is validated strictly (invalid_params on mistakes).
+    The configured default applies only where it can work: it is skipped, not
+    rejected, when it equals the chosen model or can't do the requested ratio.
+    """
     fallback = request.fallback_model
+    if fallback == NO_FALLBACK:
+        return None, "none"
     if fallback is None:
-        return
+        default = settings.default_fallback_model
+        if default is None or default == model:
+            return None, "none"
+        allowed = SUPPORTED_MODELS[default].aspect_ratios
+        if allowed is not None and request.aspect_ratio not in allowed:
+            return None, "none"
+        return default, "default"
     if fallback not in SUPPORTED_MODELS:
         raise GenerationError(
             ErrorCode.INVALID_PARAMS,
@@ -529,6 +555,7 @@ def _validate(request: GenerateRequest, model: str) -> None:
         )
     # Checked up front so a fallback can't fail on a ratio we already know it rejects.
     _check_aspect_ratio(fallback, request.aspect_ratio, "fallback_model")
+    return fallback, "request"
 
 
 def _grounding_applies(request: GenerateRequest, model: str) -> bool:
@@ -573,14 +600,14 @@ async def _call_model(
 async def _generate_with_fallback(
     request: GenerateRequest,
     model: str,
+    fallback: str | None,
     settings: Settings,
     http_client: httpx.AsyncClient | None,
 ) -> tuple[bytes, str, str]:
-    """Generate with ``model``; on content_filtered only, try ``fallback_model`` once.
+    """Generate with ``model``; on content_filtered only, try ``fallback`` once.
 
     Returns (image bytes, format, model that produced the image).
     """
-    fallback = request.fallback_model
     try:
         image_bytes, fmt = await _call_model(request, model, settings, http_client)
         return image_bytes, fmt, model
@@ -608,6 +635,8 @@ async def _generate(
 ) -> GenerateResponse:
     """Orchestrate generation: validate → cache check → generate (with fallback) → save → cache set."""
     _validate(request, model)
+    fallback, fallback_source = _resolve_fallback(request, model, settings)
+    _log_fields.get().update(fallback_model=fallback, fallback_source=fallback_source)
 
     cache_key = compute_cache_key(
         request.prompt,
@@ -615,7 +644,7 @@ async def _generate(
         request.aspect_ratio,
         request.size,
         request.style,
-        request.fallback_model,
+        fallback,
         request.grounding,
     )
 
@@ -638,7 +667,7 @@ async def _generate(
             raise GenerationError(ErrorCode.GENERATION_IN_PROGRESS)
 
     try:
-        image_bytes, fmt, actual_model = await _generate_with_fallback(request, model, settings, http_client)
+        image_bytes, fmt, actual_model = await _generate_with_fallback(request, model, fallback, settings, http_client)
 
         grounding_used = _grounding_applies(request, actual_model)
         gen_id = str(uuid.uuid4())

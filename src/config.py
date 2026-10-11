@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 EndpointType = Literal["chat", "images"]
@@ -91,7 +91,13 @@ class Settings(BaseSettings):
 
     litellm_base_url: str = Field("http://localhost:4000", description="LiteLLM Proxy URL")
     litellm_api_key: str = Field("", description="LiteLLM Virtual Key")
+    # Main / backup models when the caller omits model / fallback_model. Switch
+    # them by editing these env vars and restarting (see README).
     default_model: str = "gemini-3.1-flash-image-preview"
+    default_fallback_model: str | None = Field(
+        "doubao-seedream-4-5",
+        description="Backup model on content_filtered when the caller passes no fallback_model; empty disables",
+    )
     redis_url: str = "redis://redis:6379/0"
     storage_dir: str = "storage/images"
     static_url_prefix: str = "/static/images"
@@ -115,3 +121,22 @@ class Settings(BaseSettings):
         "doubao-seedream-4-5-251128",
         description="Ark Seedream wire model id (version-pinned)",
     )
+
+    @field_validator("default_fallback_model", mode="before")
+    @classmethod
+    def _empty_fallback_is_none(cls, v: object) -> object:
+        return None if isinstance(v, str) and not v.strip() else v
+
+    @model_validator(mode="after")
+    def _check_default_models(self) -> Settings:
+        # Fail at startup (the deploy health check catches it) rather than on
+        # every request after a typo in .env.
+        if self.default_model not in SUPPORTED_MODELS:
+            raise ValueError(f"DEFAULT_MODEL '{self.default_model}' is not a supported model")
+        fallback = self.default_fallback_model
+        if fallback is not None:
+            if fallback not in SUPPORTED_MODELS:
+                raise ValueError(f"DEFAULT_FALLBACK_MODEL '{fallback}' is not a supported model")
+            if fallback == self.default_model:
+                raise ValueError("DEFAULT_FALLBACK_MODEL must differ from DEFAULT_MODEL")
+        return self

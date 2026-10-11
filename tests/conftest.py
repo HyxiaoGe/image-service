@@ -87,6 +87,7 @@ def settings(tmp_storage: Path) -> Settings:
         storage_dir=str(tmp_storage),
         static_url_prefix="/static/images",
         default_model="gemini-3-pro-image-preview",
+        default_fallback_model=None,  # tests opt in to fallback explicitly
         rate_limit_global=20,
         rate_limit_per_ip=5,
         rate_limit_window=60,

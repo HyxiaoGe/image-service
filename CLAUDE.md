@@ -32,7 +32,7 @@ python scripts/check_architecture.py                                 # layer dep
 
 ## Config
 
-Env vars loaded from `.env` (see `.env.example`). Key settings: `LITELLM_BASE_URL`, `LITELLM_API_KEY`, `REDIS_URL`, `DEFAULT_MODEL`, `API_KEY` (optional auth), `SERVICE_BASE_URL`.
+Env vars loaded from `.env` (see `.env.example`). Key settings: `LITELLM_BASE_URL`, `LITELLM_API_KEY`, `REDIS_URL`, `DEFAULT_MODEL`, `DEFAULT_FALLBACK_MODEL` (switching: see README), `API_KEY` (optional auth), `SERVICE_BASE_URL`.
 
 ## Docs index
 

@@ -74,8 +74,9 @@ async def generate_image(
         size: Output dimensions as 'WxH'. Default '1024x1024'.
         style: Style hint e.g. 'watercolor', 'photorealistic' (optional).
         fallback_model: Model to retry with once if `model`'s content filter blocks
-            the request (optional, off by default). Only content_filtered triggers
-            it; the result's "Model" line shows which model produced the image.
+            the request. Omit to use the service's default backup model; pass
+            'none' to disable. Only content_filtered triggers it; the result's
+            "Model" line shows which model produced the image.
         grounding: Set true to let the model look things up with Google Search
             first, so recent products, landmarks and events are drawn accurately.
             Models without search support ignore it ("Grounding used" shows
