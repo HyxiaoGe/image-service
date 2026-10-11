@@ -1,10 +1,101 @@
+<div align="center">
+
 # image-service
 
-通用的 AI 生图服务：把 Gemini（经 LiteLLM Proxy）和 Seedream（火山方舟）包装成 REST 接口和 MCP 工具，带 Redis 缓存、限流和 Prometheus 指标。
+**通用的 AI 生图服务**
 
-- REST：`POST /v1/generate`、`GET /v1/models`、`GET /v1/health`
-- MCP：`generate_image`、`list_models`（路径 `/mcp`）
-- 本地开发、测试、架构约束见 `CLAUDE.md` 和 `docs/`
+把 Gemini（经 LiteLLM Proxy）和 Seedream（火山方舟）包装成统一的 REST 接口和 MCP 工具
+
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![MCP](https://img.shields.io/badge/MCP-FastMCP-6E56CF)
+![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)
+![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?logo=prometheus&logoColor=white)
+
+</div>
+
+## 效果
+
+同一句 prompt：`A lighthouse on a rocky coast at sunset, photorealistic`，交给不同模型的出图结果：
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/lighthouse-nano-banana-2.1.jpg" alt="gemini-nano-banana-2.1"><br><sub><code>gemini-nano-banana-2.1</code>（默认）</sub></td>
+    <td align="center"><img src="docs/images/lighthouse-gemini-3.1-flash-image.jpg" alt="gemini-3.1-flash-image"><br><sub><code>gemini-3.1-flash-image</code></sub></td>
+    <td align="center"><img src="docs/images/lighthouse-gemini-3-pro-image.jpg" alt="gemini-3-pro-image"><br><sub><code>gemini-3-pro-image</code></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/lighthouse-seedream-5-0-pro.jpg" alt="doubao-seedream-5-0-pro"><br><sub><code>doubao-seedream-5-0-pro</code>（默认备用）</sub></td>
+    <td align="center"><img src="docs/images/lighthouse-seedream-5-0-flash.jpg" alt="doubao-seedream-5-0-flash"><br><sub><code>doubao-seedream-5-0-flash</code></sub></td>
+    <td align="center"><img src="docs/images/lighthouse-seedream-5-0-lite.jpg" alt="doubao-seedream-5-0-lite"><br><sub><code>doubao-seedream-5-0-lite</code></sub></td>
+  </tr>
+</table>
+
+## 功能
+
+| | |
+|---|---|
+| 🎨 **多模型** | Gemini 稳定版与 Seedream 5.0 系列，一个接口切换；主模型被内容审核拦截时自动换备用模型 |
+| 🖼️ **参考图** | `reference_images` 传图片 URL；`reference_subject` 自动搜真实照片作参考，让真实产品画得准 |
+| 🔎 **搜索增强** | `grounding` 让 Gemini 先联网搜索再出图 |
+| ⚡ **缓存** | Redis 缓存 7 天，同样的请求直接返回；并发相同请求只生成一次 |
+| 🛡️ **防护** | Bearer token 鉴权、全局 / 单 IP 限流、参考图只允许公网地址 |
+| 📈 **可观测** | 每次请求一条结构化汇总日志，Prometheus 指标在 `/metrics` |
+
+## 目录
+
+- [快速开始](#快速开始)
+- [切换主力 / 备用模型](#切换主力--备用模型)
+- [支持的模型](#支持的模型)
+- [参考图（reference_images）](#参考图reference_images)
+- [自动找参考图（reference_subject）](#自动找参考图reference_subject)
+
+## 快速开始
+
+**接口一览**
+
+| 方式 | 入口 |
+|---|---|
+| REST | `POST /v1/generate`、`GET /v1/models`、`GET /v1/health` |
+| MCP | `generate_image`、`list_models`（路径 `/mcp`） |
+
+**出一张图**
+
+```bash
+curl -s http://localhost:8090/v1/generate \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "A lighthouse on a rocky coast at sunset, photorealistic", "aspect_ratio": "16:9"}'
+```
+
+```json
+{
+  "id": "…",
+  "image_url": "/static/images/<id>.png",
+  "model": "gemini-nano-banana-2.1",
+  "requested_model": "gemini-nano-banana-2.1",
+  "fallback_used": false,
+  "grounding_used": false,
+  "cached": false,
+  "created_at": "…",
+  "reference_images_used": [],
+  "reference_search": null
+}
+```
+
+REST 返回的 `image_url` 是相对路径，拼上服务地址即可访问；MCP 返回的已经是完整 URL。没有配置 `API_KEY` 时不需要 `Authorization` 头。其他常用参数：`model`、`size`、`style`、`fallback_model`、`grounding`、`reference_images`、`reference_subject`、`no_cache`，完整说明见 `/docs`（FastAPI 自动生成）。
+
+**本地开发**
+
+```bash
+cp .env.example .env                                                  # 填 LITELLM_* / ARK_API_KEY / REDIS_URL
+uv run uvicorn src.main:create_app --factory --reload --port 8090    # 启动
+uv run pytest                                                         # 测试
+ruff check . && ruff format .                                         # lint + 格式化
+python scripts/check_architecture.py                                  # 分层依赖检查
+```
+
+架构和代码约定见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)、[`docs/CODING_CONVENTIONS.md`](docs/CODING_CONVENTIONS.md)。
 
 ## 切换主力 / 备用模型
 
