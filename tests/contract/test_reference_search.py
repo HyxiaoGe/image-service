@@ -520,3 +520,74 @@ async def test_og_sized_official_images_are_judged(client, web):
     data = (await post(client, reference_subject="iPhone 18 Pro")).json()
 
     assert data["reference_images_used"] == [og]
+
+
+# --- reference hint appended to the prompt ------------------------------------
+
+HINT = "参考图是 iPhone 18 Pro 的真实照片，外观以它为准。"
+
+
+def sent_text(web: Web, call: int = -1) -> str:
+    content = web.generations()[call]["messages"][0]["content"]
+    return content if isinstance(content, str) else content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_found_reference_appends_hint(client, web):
+    await post(client, reference_subject="iPhone 18 Pro")
+
+    assert sent_text(web) == "iPhone 18 Pro launch poster\n" + HINT
+
+
+@pytest.mark.asyncio
+async def test_hint_on_subject_cache_hit_and_not_in_generation_cache_key(client, web):
+    await post(client, reference_subject="iPhone 18 Pro")
+    await post(client, prompt="another poster", reference_subject="iPhone 18 Pro")
+    again = (await post(client, reference_subject="iPhone 18 Pro")).json()
+
+    assert sent_text(web) == "another poster\n" + HINT
+    assert again["cached"] is True  # same request → same cache entry; the hint isn't keyed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["none_accepted", "search_failed", "caller_refs_only", "no_subject"])
+async def test_no_hint_without_found_images(client, web, app, case):
+    body = {"reference_subject": "iPhone 18 Pro"}
+    if case == "none_accepted":
+        web.verdicts = {}
+    elif case == "search_failed":
+        web.tavily = [httpx.Response(500)]
+    else:
+        caller = "https://img.example.com/caller.png"
+        web.files[caller] = httpx.Response(200, content=png(1000, 1000, b"caller"))
+        body = {"reference_images": [caller]} if case == "caller_refs_only" else {}
+
+    await post(client, **body)
+
+    assert sent_text(web) == "iPhone 18 Pro launch poster"
+
+
+@pytest.mark.asyncio
+async def test_hint_reaches_seedream_fallback(client, web, app):
+    from tests.conftest import make_seedream_response
+
+    app.state.settings.ark_api_key = "k"
+    original = web.handle_async_request
+
+    async def route(request):
+        if request.url.path.endswith("/images/generations"):
+            web.requests.append(request)
+            return httpx.Response(200, json=make_seedream_response())
+        if request.url.path.endswith("/chat/completions") and json.loads(request.content)["model"] != JUDGE_MODEL:
+            web.requests.append(request)
+            return httpx.Response(
+                200, json={"choices": [{"finish_reason": "content_filter", "message": {"content": None}}]}
+            )
+        return await original(request)
+
+    web.handle_async_request = route
+    data = (await post(client, reference_subject="iPhone 18 Pro", fallback_model="doubao-seedream-5-0-pro")).json()
+
+    assert data["fallback_used"] is True
+    [ark] = [json.loads(r.content) for r in web.requests if r.url.path.endswith("/images/generations")]
+    assert ark["prompt"].endswith(HINT)

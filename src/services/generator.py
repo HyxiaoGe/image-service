@@ -31,6 +31,9 @@ from src.services.references import ReferenceImage, ReferenceImageError, load_re
 
 logger = structlog.get_logger()
 
+# Appended to the prompt when reference_subject found images (approved wording).
+REFERENCE_HINT = "参考图是 {subject} 的真实照片，外观以它为准。"
+
 
 class GenerationError(Exception):
     """Raised when image generation fails; carries a caller-facing ErrorCode.
@@ -759,7 +762,16 @@ async def _generate(
         outcome = await _find_references(request, len(references), settings, cache, http_client)
         reference_urls = list(request.reference_images or [])
         reference_search = None
+        upstream_request = request
         if outcome is not None:
+            if outcome.images:
+                # Without being told what the found image is, the model ignored it and drew
+                # the product from memory (0/4 vs 2/4 in testing). The sentence says what the
+                # image is and how to use it; it never describes the look. Not part of the
+                # cache key, and caller-supplied reference_images get no such sentence.
+                hint = REFERENCE_HINT.format(subject=request.reference_subject)
+                upstream_request = request.model_copy(update={"prompt": f"{request.prompt.rstrip()}\n{hint}"})
+                _log_fields.get()["reference_hint_added"] = True
             references += outcome.images
             reference_urls += outcome.urls
             reference_search = ReferenceSearchInfo(
@@ -769,7 +781,7 @@ async def _generate(
                 accepted=outcome.accepted,
             )
         image_bytes, fmt, actual_model = await _generate_with_fallback(
-            request, model, fallback, settings, http_client, references
+            upstream_request, model, fallback, settings, http_client, references
         )
 
         grounding_used = _grounding_applies(request, actual_model)
