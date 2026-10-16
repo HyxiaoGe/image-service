@@ -90,7 +90,7 @@ async def test_gemini_no_image(client, app, response_data):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [429, 500, 503])
+@pytest.mark.parametrize("status", [402, 429, 500, 503])
 async def test_gemini_unavailable(client, app, status):
     use_transport(app, MockTransport(response_data={"error": {"message": "quota exceeded"}}, status_code=status))
     data = assert_error(await post(client), 502, "upstream_unavailable", True)

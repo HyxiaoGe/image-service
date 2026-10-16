@@ -242,7 +242,8 @@ def _json_body(resp: httpx.Response, provider: str) -> dict:
 
 
 def _status_error_code(status: int) -> ErrorCode:
-    if status == 429 or status >= 500:
+    # 402: our provider balance is exhausted -- the provider is down for us until topped up.
+    if status in (402, 429) or status >= 500:
         return ErrorCode.UPSTREAM_UNAVAILABLE
     return ErrorCode.UPSTREAM_ERROR
 
@@ -821,7 +822,7 @@ async def _find_references(
 
 
 # Failures that move on to the next model: a moderation block, or the provider
-# being down (429 / 5xx / unreachable). Timeouts don't: another full attempt
+# being down (402 balance exhausted / 429 / 5xx / unreachable). Timeouts don't: another full attempt
 # would blow the caller's time budget.
 FALLBACK_CODES = frozenset({ErrorCode.CONTENT_FILTERED, ErrorCode.UPSTREAM_UNAVAILABLE})
 

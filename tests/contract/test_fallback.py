@@ -41,7 +41,7 @@ async def test_no_fallback_without_opt_in(client, routing):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("status", [402, 429, 503])
 async def test_unavailable_primary_falls_back(client, routing, status):
     routing.gemini = (status, {"error": {"message": "overloaded"}})
 
