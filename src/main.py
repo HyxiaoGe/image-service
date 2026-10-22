@@ -18,6 +18,7 @@ from src.api.generate import validation_exception_handler
 from src.api.router import v1_router
 from src.config import Settings
 from src.mcp.server import init_mcp, mcp
+from src.middleware.disconnect import DisconnectMiddleware
 from src.services.cache import CacheService
 
 
@@ -82,6 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
+    app.add_middleware(DisconnectMiddleware)
 
     # Static file serving for generated images
     storage_path = Path(settings.storage_dir)

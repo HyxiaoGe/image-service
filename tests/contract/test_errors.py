@@ -104,11 +104,11 @@ async def test_gemini_other_4xx(client, app):
 
 
 @pytest.mark.asyncio
-async def test_upstream_timeout_after_retries(client, app):
+async def test_upstream_read_timeout_is_not_resent(client, app):
     transport = RaisingTransport(httpx.ReadTimeout)
     use_transport(app, transport)
     assert_error(await post(client), 504, "upstream_timeout", True)
-    assert transport.call_count == generator.MAX_RETRIES + 1
+    assert transport.call_count == 1
 
 
 @pytest.mark.asyncio

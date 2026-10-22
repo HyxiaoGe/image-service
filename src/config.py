@@ -188,6 +188,11 @@ class Settings(BaseSettings):
     rate_limit_per_ip: int = 5
     rate_limit_window: int = 60
     cache_ttl_seconds: int = 604800  # 7 days
+    generation_timeout_seconds: float = Field(135, gt=0, allow_inf_nan=False)
+    model_timeout_seconds: float = Field(60, gt=0, allow_inf_nan=False)
+    seedream_pro_timeout_seconds: float = Field(105, gt=0, allow_inf_nan=False)
+    fallback_reserve_seconds: float = Field(30, ge=0, allow_inf_nan=False)
+    min_model_budget_seconds: float = Field(5, gt=0, allow_inf_nan=False)
     ark_api_key: str = Field("", description="Volcengine Ark API key (Seedream)")
     ark_base_url: str = Field(
         "https://ark.cn-beijing.volces.com/api/v3",

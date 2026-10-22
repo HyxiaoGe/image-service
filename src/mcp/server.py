@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import structlog
 from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_http_request
 from fastmcp.tools import ToolResult
 from pydantic import ValidationError
 
@@ -81,8 +82,10 @@ async def generate_image(
         fallback_model: Model to retry with if `model`'s content filter blocks the
             request or its provider is unavailable. Omit to use the service's
             default backup models (tried in order); pass 'none' to disable.
-            Timeouts never fall back; the result's "Model" line shows which model
-            produced the image.
+            Generation timeouts may use the next backup within the remaining
+            total budget; the timed-out model is not resent the request. An
+            already-submitted timed-out request may still be billed upstream.
+            The result's "Model" line shows which model produced the image.
         grounding: Set true to let the model look things up with Google Search
             first, so recent products, landmarks and events are drawn accurately.
             Models without search support ignore it ("Grounding used" shows
@@ -110,6 +113,10 @@ async def generate_image(
 
     On failure the text starts with "Error generating image [<code>]:" and the
     structured content is {"ok": false, "error": {"code", "message", "retryable", ...}}.
+    The service applies one configurable total deadline (default 135 seconds),
+    including reference lookup, cache waits and all model attempts. Cancellation
+    or HTTP disconnect stops local work and further attempts; it cannot guarantee
+    that a provider stops or refunds an already-submitted generation.
     """
     if _settings is None or _cache is None:
         return _error_result(ErrorCode.CONFIG_MISSING, "MCP server not initialized")
@@ -134,7 +141,18 @@ async def generate_image(
         return _error_result(ErrorCode.INVALID_PARAMS, first, fields=validation_error_fields(errors))
 
     try:
-        result = await handle_generate(request, _settings, _cache, http_client=_http_client, entry="mcp")
+        try:
+            lifetime = getattr(get_http_request().state, "image_generation", None)
+        except RuntimeError:  # In-memory / stdio MCP has no HTTP request.
+            lifetime = None
+        result = await handle_generate(
+            request,
+            _settings,
+            _cache,
+            http_client=_http_client,
+            entry="mcp",
+            lifetime=lifetime,
+        )
     except GenerationError as e:
         return _error_result(e.code, e.message, model=e.model, fields=e.fields, fallback_from=e.fallback_from)
     except Exception:

@@ -33,7 +33,8 @@ class GenerateRequest(BaseModel):
         None,
         description="Model to retry with if the primary model's content filter blocks the request or its "
         "provider is unavailable. Omitted: the service's DEFAULT_FALLBACK_MODEL chain, tried in order. "
-        "'none': no fallback. Timeouts and other failures never fall back.",
+        "Generation timeouts may use the next backup within the remaining total budget, without resending "
+        "to the timed-out model. A submitted timed-out request may still be billed. 'none': no fallback.",
     )
     grounding: bool = Field(
         False,

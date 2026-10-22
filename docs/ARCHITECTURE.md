@@ -40,13 +40,15 @@
 2. `middleware/auth.py` checks Bearer token (if API_KEY configured)
 3. `middleware/rate_limit.py` checks global + per-IP counters in Redis
 4. `services/generator.py` orchestrates:
+   - Apply one configurable generation deadline (135s by default); resolve model / quality
    - Compute cache key (SHA-256 of normalized params)
    - Check Redis cache -> return cached result if hit
    - Acquire Redis lock (thundering herd protection)
-   - Call Gemini API with retries (max 2 retries, 300s timeout)
+   - Call the selected provider within its model limit and remaining total budget; reserve time for a backup
+   - Retry only connection/pool failures (max 2 retries); generation read/write timeouts may use a backup
    - Save image to disk (`storage/images/`)
    - Store metadata in Redis cache (7-day TTL)
-   - Release lock
+   - Release the owned lock with bounded, cancellation-shielded cleanup
 5. Response includes image URL served via FastAPI StaticFiles
 
 ## MCP interface
@@ -54,6 +56,12 @@
 Mounted at `/mcp` (stateless HTTP). Two tools:
 - `generate_image` -- same flow as REST, returns text summary with full URL
 - `list_models` -- returns available model list
+
+`DisconnectMiddleware` is a plain ASGI wrapper with a bounded request-body relay.
+It observes disconnects without competing with body / SSE readers, and attaches a
+shared `RequestLifetime` to request state. REST and MCP pass that lifetime into the
+same generation scope. This also cancels stateless MCP tools running in the SDK's
+separate lifespan task group. SDK cancellation notifications propagate normally.
 
 ## Layer dependency rules
 

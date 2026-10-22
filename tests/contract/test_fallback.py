@@ -66,12 +66,11 @@ async def test_unreachable_primary_falls_back(client, routing, monkeypatch):
 @pytest.mark.parametrize(
     ("answer", "code"),
     [
-        (httpx.ReadTimeout("slow"), "upstream_timeout"),
         # Dropped mid-response: the image may already be billed.
         (httpx.RemoteProtocolError("dropped"), "upstream_unavailable"),
         ((400, {"error": {"message": "bad request"}}), "upstream_error"),
     ],
-    ids=["timeout", "transport-error", "400"],
+    ids=["transport-error", "400"],
 )
 async def test_other_errors_do_not_fall_back(client, routing, monkeypatch, answer, code):
     monkeypatch.setattr(generator.asyncio, "sleep", _no_sleep)

@@ -36,7 +36,7 @@ async def test_seedream_primary_overdue_falls_back(client, app, routing, model, 
 
 
 @pytest.mark.asyncio
-async def test_seedream_submitted_timeout_does_not_generate_on_backup(client, app, routing):
+async def test_seedream_submitted_timeout_uses_backup_once(client, app, routing):
     app.state.settings.default_model = FLASH
     app.state.settings.default_fallback_model = GEMINI
     routing.ark = httpx.ReadTimeout("already submitted")
@@ -44,9 +44,11 @@ async def test_seedream_submitted_timeout_does_not_generate_on_backup(client, ap
 
     response = await client.post("/v1/generate", json={"prompt": "poster"})
 
-    assert response.status_code == 504
-    assert response.json()["error"] == "upstream_timeout"
-    assert routing.calls == {"gemini": 0, "ark": 1}
+    assert response.status_code == 200
+    assert response.json()["requested_model"] == FLASH
+    assert response.json()["model"] == GEMINI
+    assert response.json()["fallback_used"] is True
+    assert routing.calls == {"gemini": 1, "ark": 1}
 
 
 @pytest.mark.asyncio

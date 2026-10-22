@@ -159,13 +159,6 @@ async def test_release_only_removes_own_lock(fake_redis):
     assert await fake_redis.get("lock:image:k") is None
 
 
-def test_lock_ttl_covers_worst_case_generation():
-    from src.services import generator
-
-    worst = generator.REQUEST_TIMEOUT * (generator.MAX_RETRIES + 1) + 2 * generator.MAX_RETRIES
-    assert worst < generator.LOCK_TTL_SECONDS
-
-
 # --- MCP --------------------------------------------------------------------
 
 

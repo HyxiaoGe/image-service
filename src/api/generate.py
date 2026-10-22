@@ -76,7 +76,14 @@ async def generate(body: GenerateRequest, request: Request) -> GenerateResponse 
 
     try:
         http_client = getattr(request.app.state, "http_client", None)
-        return await handle_generate(body, settings, cache, http_client=http_client, entry="rest")
+        return await handle_generate(
+            body,
+            settings,
+            cache,
+            http_client=http_client,
+            entry="rest",
+            lifetime=getattr(request.state, "image_generation", None),
+        )
     except GenerationError as e:
         return error_response(e.code, e.message, model=e.model, fields=e.fields, fallback_from=e.fallback_from)
     except Exception:

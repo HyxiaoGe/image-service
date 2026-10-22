@@ -627,6 +627,7 @@ name = "image-service"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "fastapi" },
     { name = "fastmcp" },
     { name = "httpx" },
@@ -648,6 +649,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.5" },
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.26.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "fastmcp", specifier = ">=3.4,<5" },

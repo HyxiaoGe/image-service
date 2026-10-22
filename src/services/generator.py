@@ -8,16 +8,20 @@ import re
 import time
 import uuid
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import anyio
 import httpx
 import structlog
 
 from src.config import SUPPORTED_MODELS, Settings
 from src.models.errors import ERROR_SPECS, ErrorCode
+from src.models.lifetime import RequestLifetime
 from src.models.request import MAX_REFERENCE_IMAGES, GenerateRequest
 from src.models.response import GenerateResponse, ReferenceSearchInfo
+from src.services.budget import CLEANUP_TIMEOUT_SECONDS, current_budget, generation_scope
 from src.services.cache import CacheService, compute_cache_key
 from src.services.metrics import (
     CACHE_HITS,
@@ -57,6 +61,7 @@ class GenerationError(Exception):
         fields: list[str] | None = None,
         fallback_from: dict[str, str] | None = None,
         maybe_billed: bool = False,
+        timeout_fallback_allowed: bool = False,
     ):
         spec = ERROR_SPECS[code]
         self.code = code
@@ -69,17 +74,24 @@ class GenerationError(Exception):
         self.fields = fields
         self.fallback_from = fallback_from  # set when every fallback model also failed
         # The upstream may already have produced (and billed) an image, e.g. the
-        # connection dropped mid-response: never retried on another model.
+        # connection dropped mid-response. Only generation timeouts explicitly
+        # opt into a backup despite that uncertainty.
         self.maybe_billed = maybe_billed
+        self.timeout_fallback_allowed = timeout_fallback_allowed
         super().__init__(self.message)
 
 
 MAX_RETRIES = 2
-REQUEST_TIMEOUT = 300.0  # 5 minutes — complex prompts can take a while
-# The generation lock must outlive the slowest possible generation (every attempt
-# timing out plus retry sleeps), or a second identical request could start a
-# duplicate upstream call while the first is still running.
-LOCK_TTL_SECONDS = int(REQUEST_TIMEOUT * (MAX_RETRIES + 1)) + 60
+
+
+@dataclass
+class ModelAttempt:
+    deadline: float
+    submitted: bool = False
+    response_received: bool = False
+
+
+_model_attempt: ContextVar[ModelAttempt | None] = ContextVar("model_attempt", default=None)
 
 # Upstream POST attempts (incl. retries) for the current request; read by the
 # summary log in handle_generate.
@@ -170,27 +182,43 @@ async def _post_with_retries(
     provider: str,
     http_client: httpx.AsyncClient | None = None,
     *,
-    retry_timeouts: bool = True,
+    timeout_seconds: float = 60,
 ) -> httpx.Response:
-    """POST with bounded retries on timeout/connect errors.
+    """Retry only connection/pool failures, inside the model and request deadlines.
 
     Returns the upstream response (caller checks status_code). Raises
     GenerationError after exhausting retries.
     """
     resp = None
     for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
+        budget = current_budget()
+        if budget is not None:
+            await budget.checkpoint()
+        else:
+            await anyio.lowlevel.checkpoint()
+        state = _model_attempt.get()
+        if state is not None and state.deadline <= time.monotonic():
+            raise GenerationError(ErrorCode.UPSTREAM_TIMEOUT, timeout_fallback_allowed=True)
+        remaining = min(timeout_seconds, max(0.001, state.deadline - time.monotonic())) if state else timeout_seconds
+        timeout = httpx.Timeout(remaining, connect=min(5, remaining), pool=min(5, remaining))
         _upstream_attempts.set(_upstream_attempts.get() + 1)
         logger.info("upstream_request", provider=provider, model=model, attempt=attempt)
         try:
+            if state is not None:
+                state.submitted = True
             if http_client is not None:
-                resp = await http_client.post(url, headers=headers, json=payload)
+                resp = await http_client.post(url, headers=headers, json=payload, timeout=timeout)
             else:
-                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     resp = await client.post(url, headers=headers, json=payload)
+            if state is not None:
+                state.response_received = resp.status_code == 200
             break  # Success, exit retry loop
         except httpx.TimeoutException as e:
             logger.warning("upstream_timeout", provider=provider, model=model, attempt=attempt)
-            safe_to_retry = retry_timeouts or isinstance(e, (httpx.ConnectTimeout, httpx.PoolTimeout))
+            safe_to_retry = isinstance(e, (httpx.ConnectTimeout, httpx.PoolTimeout))
+            if safe_to_retry and state is not None:
+                state.submitted = False
             if safe_to_retry and attempt < MAX_RETRIES + 1:
                 await asyncio.sleep(2)
                 continue
@@ -198,8 +226,11 @@ async def _post_with_retries(
                 ErrorCode.UPSTREAM_TIMEOUT,
                 upstream_detail=f"{provider} timed out after {attempt} attempts",
                 maybe_billed=not safe_to_retry,
+                timeout_fallback_allowed=True,
             ) from None
         except httpx.ConnectError:
+            if state is not None:
+                state.submitted = False
             logger.warning("upstream_connect_error", provider=provider, model=model, attempt=attempt)
             if attempt < MAX_RETRIES + 1:
                 await asyncio.sleep(2)
@@ -362,7 +393,15 @@ async def call_gemini(
         "Authorization": f"Bearer {settings.litellm_api_key}",
     }
 
-    resp = await _post_with_retries(url, headers, payload, model=model, provider="litellm", http_client=http_client)
+    resp = await _post_with_retries(
+        url,
+        headers,
+        payload,
+        model=model,
+        provider="litellm",
+        http_client=http_client,
+        timeout_seconds=settings.model_timeout_seconds,
+    )
 
     if resp.status_code != 200:
         raise _gemini_http_error(resp)
@@ -433,7 +472,17 @@ async def call_seedream_images(
 
     _log_fields.get({}).update(ark_model=payload["model"], ark_size=payload["size"])
     resp = await _post_with_retries(
-        url, headers, payload, model=model, provider="ark", http_client=http_client, retry_timeouts=False
+        url,
+        headers,
+        payload,
+        model=model,
+        provider="ark",
+        http_client=http_client,
+        timeout_seconds=(
+            settings.seedream_pro_timeout_seconds
+            if model == "doubao-seedream-5-0-pro"
+            else settings.model_timeout_seconds
+        ),
     )
     _log_fields.get({})["ark_request_id"] = resp.headers.get("x-tt-logid") or resp.headers.get("x-request-id")
 
@@ -540,7 +589,15 @@ async def call_qwen_images(
 
     url = f"{settings.dashscope_base_url}/services/aigc/multimodal-generation/generation"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {settings.dashscope_api_key}"}
-    resp = await _post_with_retries(url, headers, payload, model=model, provider="dashscope", http_client=http_client)
+    resp = await _post_with_retries(
+        url,
+        headers,
+        payload,
+        model=model,
+        provider="dashscope",
+        http_client=http_client,
+        timeout_seconds=settings.model_timeout_seconds,
+    )
     if resp.status_code != 200:
         raise _qwen_http_error(resp)
 
@@ -606,9 +663,10 @@ async def handle_generate(
     cache: CacheService,
     http_client: httpx.AsyncClient | None = None,
     entry: str = "rest",
+    lifetime: RequestLifetime | None = None,
 ) -> GenerateResponse:
     """Generate (or fetch from cache) and emit one ``generation_finished`` summary log."""
-    started = time.perf_counter()
+    started = lifetime.started_at if lifetime is not None else time.monotonic()
     _upstream_attempts.set(0)
     _search_stats.set(None)
     if request.model:
@@ -623,6 +681,8 @@ async def handle_generate(
         "requested_model": requested_model,
         "quality": request.quality,
         "model_source": model_source,
+        "total_budget_seconds": settings.generation_timeout_seconds,
+        "stage": "validation",
         "aspect_ratio": request.aspect_ratio,
         "size": request.size,
         "grounding": request.grounding,
@@ -642,11 +702,22 @@ async def handle_generate(
             **fields,
             **extra,
             attempts=_upstream_attempts.get(),
-            duration_ms=int((time.perf_counter() - started) * 1000),
+            duration_ms=int((time.monotonic() - started) * 1000),
         )
 
     try:
-        result = await _generate(request, requested_model, settings, cache, http_client)
+        try:
+            async with generation_scope(settings, lifetime):
+                result = await _generate(request, requested_model, settings, cache, http_client)
+        except TimeoutError:
+            REQUEST_COUNT.labels(model=fields.get("active_model") or requested_model, status="error").inc()
+            raise GenerationError(
+                ErrorCode.UPSTREAM_TIMEOUT,
+                "Generation exceeded the total time budget.",
+                model=fields.get("active_model") or requested_model,
+                upstream_detail="total generation deadline exceeded",
+                fallback_from=(fields["fallback_tried"][0] if fields.get("fallback_tried") else None),
+            ) from None
     except GenerationError as e:
         e.model = e.model or requested_model
         finish(
@@ -658,6 +729,15 @@ async def handle_generate(
             upstream_detail=e.upstream_detail,
             fallback_from=e.fallback_from,
             **(_search_stats.get() or {}),
+        )
+        raise
+    except asyncio.CancelledError:
+        REQUEST_COUNT.labels(model=fields.get("active_model") or requested_model, status="cancelled").inc()
+        finish(
+            "warning",
+            outcome="cancelled",
+            model=fields.get("active_model") or requested_model,
+            cancel_reason="client_disconnected" if lifetime and lifetime.disconnected.is_set() else "caller_cancelled",
         )
         raise
     except Exception:
@@ -761,46 +841,76 @@ async def _call_model(
     settings: Settings,
     http_client: httpx.AsyncClient | None,
     references: list[ReferenceImage],
+    *,
+    reserve_seconds: float = 0,
 ) -> tuple[bytes, str]:
     """One upstream generation with ``model``; counts per-model duration and errors."""
+    budget = current_budget()
+    if budget is not None:
+        await budget.checkpoint()
+    timeout = (
+        settings.seedream_pro_timeout_seconds if model == "doubao-seedream-5-0-pro" else settings.model_timeout_seconds
+    )
+    if budget is not None:
+        timeout = min(timeout, max(0, budget.remaining() - reserve_seconds))
+    _log_fields.get().update(active_model=model, model_budget_seconds=timeout, stage="generation")
+    state = ModelAttempt(time.monotonic() + timeout)
+    token = _model_attempt.set(state)
     try:
-        with GENERATION_DURATION.labels(model=model).time():
-            if SUPPORTED_MODELS[model].endpoint_type == "dashscope":
-                return await call_qwen_images(
-                    prompt=request.prompt,
-                    model=model,
-                    settings=settings,
-                    style=request.style,
-                    http_client=http_client,
-                    aspect_ratio=request.aspect_ratio,
-                    size=request.size,
-                    reference_images=references,
-                )
-            if SUPPORTED_MODELS[model].endpoint_type == "images":
-                return await call_seedream_images(
-                    prompt=request.prompt,
-                    model=model,
-                    settings=settings,
-                    style=request.style,
-                    http_client=http_client,
-                    aspect_ratio=request.aspect_ratio,
-                    size=request.size,
-                    reference_images=references,
-                )
-            return await call_gemini(
-                prompt=request.prompt,
-                model=model,
-                settings=settings,
-                style=request.style,
-                http_client=http_client,
-                aspect_ratio=request.aspect_ratio,
-                search_types=SUPPORTED_MODELS[model].search_types if request.grounding else (),
-                reference_images=references,
+        if timeout < settings.min_model_budget_seconds:
+            raise GenerationError(
+                ErrorCode.UPSTREAM_TIMEOUT,
+                "Not enough time remains to start this model.",
+                timeout_fallback_allowed=True,
             )
+        try:
+            with GENERATION_DURATION.labels(model=model).time(), anyio.fail_after(timeout):
+                return await _invoke_model(request, model, settings, http_client, references)
+        except TimeoutError:
+            raise GenerationError(
+                ErrorCode.UPSTREAM_TIMEOUT,
+                upstream_detail=f"model deadline exceeded ({timeout:.3f}s)",
+                maybe_billed=state.submitted,
+                timeout_fallback_allowed=not state.response_received,
+            ) from None
     except GenerationError as e:
         e.model = e.model or model
+        if e.code == ErrorCode.UPSTREAM_TIMEOUT:
+            logger.warning(
+                "model_timed_out",
+                model=model,
+                maybe_billed=e.maybe_billed,
+                timeout_fallback_allowed=e.timeout_fallback_allowed,
+                remaining_seconds=budget.remaining() if budget is not None else None,
+            )
         GENERATION_ERRORS.labels(model=model, error_type=e.code.value).inc()
         raise
+    finally:
+        _model_attempt.reset(token)
+
+
+async def _invoke_model(
+    request: GenerateRequest,
+    model: str,
+    settings: Settings,
+    http_client: httpx.AsyncClient | None,
+    references: list[ReferenceImage],
+) -> tuple[bytes, str]:
+    kwargs = dict(
+        prompt=request.prompt,
+        model=model,
+        settings=settings,
+        style=request.style,
+        http_client=http_client,
+        aspect_ratio=request.aspect_ratio,
+        reference_images=references,
+    )
+    endpoint = SUPPORTED_MODELS[model].endpoint_type
+    if endpoint == "dashscope":
+        return await call_qwen_images(**kwargs, size=request.size)
+    if endpoint == "images":
+        return await call_seedream_images(**kwargs, size=request.size)
+    return await call_gemini(**kwargs, search_types=SUPPORTED_MODELS[model].search_types if request.grounding else ())
 
 
 async def _load_references(
@@ -860,12 +970,15 @@ async def _find_references(
 
 
 # Failures that move on to the next model: a moderation block, or the provider
-# being down (402 balance exhausted / 429 / 5xx / unreachable). Timeouts don't: another full attempt
-# would blow the caller's time budget.
+# being down (402 balance exhausted / 429 / 5xx / unreachable). Generation
+# timeouts can use a backup inside the remaining budget, but are never resent
+# to the same model. A submitted timed-out request may still be billed upstream.
 FALLBACK_CODES = frozenset({ErrorCode.CONTENT_FILTERED, ErrorCode.UPSTREAM_UNAVAILABLE})
 
 
 def _falls_back(e: GenerationError) -> bool:
+    if e.code == ErrorCode.UPSTREAM_TIMEOUT:
+        return e.timeout_fallback_allowed
     return e.code in FALLBACK_CODES and not e.maybe_billed
 
 
@@ -884,7 +997,14 @@ async def _generate_with_fallback(
     model's failure.
     """
     try:
-        image_bytes, fmt = await _call_model(request, model, settings, http_client, references)
+        image_bytes, fmt = await _call_model(
+            request,
+            model,
+            settings,
+            http_client,
+            references,
+            reserve_seconds=settings.fallback_reserve_seconds if fallbacks else 0,
+        )
         return image_bytes, fmt, model
     except GenerationError as e:
         if not fallbacks or not _falls_back(e):
@@ -895,6 +1015,16 @@ async def _generate_with_fallback(
     _log_fields.get()["fallback_tried"] = tried
     previous = model
     for i, fallback in enumerate(fallbacks):
+        budget = current_budget()
+        if budget is not None:
+            await budget.checkpoint()
+            if budget.remaining() < settings.min_model_budget_seconds:
+                raise GenerationError(
+                    ErrorCode.UPSTREAM_TIMEOUT,
+                    "Not enough time remains to start a backup model.",
+                    model=previous,
+                    fallback_from=first_failure,
+                )
         logger.info("fallback_started", from_model=previous, to_model=fallback, reason=tried[-1]["code"])
         try:
             image_bytes, fmt = await _call_model(request, fallback, settings, http_client, references)
@@ -920,6 +1050,7 @@ async def _generate(
 ) -> GenerateResponse:
     """Orchestrate generation: validate → cache check → generate (with fallback) → save → cache set."""
     _validate(request, model)
+    _log_fields.get()["stage"] = "cache"
     fallbacks, fallback_source = _resolve_fallback(request, model, settings)
     # One model logs and keys exactly as before the chain existed.
     fallback_key = ",".join(fallbacks) or None
@@ -948,7 +1079,7 @@ async def _generate(
         # Thundering-herd protection: one generation per parameter set; identical
         # requests wait for its result. no_cache skips this — the caller asked
         # for a fresh image, not the one an in-flight request will produce.
-        lock_token = await cache.acquire_lock(cache_key, ttl=LOCK_TTL_SECONDS)
+        lock_token = await cache.acquire_lock(cache_key, ttl=math.ceil(settings.generation_timeout_seconds) + 5)
         if lock_token is None:
             cached = await cache.wait_for_cached(cache_key)
             if cached is not None:
@@ -956,6 +1087,7 @@ async def _generate(
             raise GenerationError(ErrorCode.GENERATION_IN_PROGRESS)
 
     try:
+        _log_fields.get()["stage"] = "references"
         references = await _load_references(request, settings, http_client)
         outcome = await _find_references(request, len(references), settings, cache, http_client)
         reference_urls = list(request.reference_images or [])
@@ -981,6 +1113,11 @@ async def _generate(
         image_bytes, fmt, actual_model = await _generate_with_fallback(
             upstream_request, model, fallbacks, settings, http_client, references
         )
+
+        budget = current_budget()
+        if budget is not None:
+            await budget.checkpoint()
+        _log_fields.get()["stage"] = "persist"
 
         grounding_used = _grounding_applies(request, actual_model)
         gen_id = str(uuid.uuid4())
@@ -1018,4 +1155,12 @@ async def _generate(
         raise
     finally:
         if lock_token is not None:
-            await cache.release_lock(cache_key, lock_token)
+            budget = current_budget()
+            cleanup = budget.cleanup_timeout if budget is not None else CLEANUP_TIMEOUT_SECONDS
+            try:
+                with anyio.move_on_after(cleanup, shield=True) as cleanup_scope:
+                    await cache.release_lock(cache_key, lock_token)
+                if cleanup_scope.cancelled_caught:
+                    logger.warning("generation_lock_release_timed_out", cache_key=cache_key)
+            except Exception:
+                logger.warning("generation_lock_release_failed", cache_key=cache_key)
