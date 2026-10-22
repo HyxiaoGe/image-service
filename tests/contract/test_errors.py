@@ -151,6 +151,42 @@ async def test_seedream_other_4xx(client, app):
     assert_error(await post(client, model="doubao-seedream-4-5"), 502, "upstream_error", False)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ark_code", ["AccountOverdueError", "OperationDenied.ServiceOverdue"])
+async def test_seedream_403_overdue_is_unavailable(client, app, ark_code):
+    app.state.settings.ark_api_key = "k"
+    body = {"error": {"code": ark_code, "message": "overdue"}}
+    use_transport(app, MockTransport(response_data=body, status_code=403))
+    assert_error(await post(client, model="doubao-seedream-5-0-flash"), 502, "upstream_unavailable", True)
+
+
+@pytest.mark.asyncio
+async def test_seedream_403_permission_error_is_not_unavailable(client, app):
+    app.state.settings.ark_api_key = "k"
+    body = {"error": {"code": "AccessDenied", "message": "denied"}}
+    use_transport(app, MockTransport(response_data=body, status_code=403))
+    assert_error(await post(client, model="doubao-seedream-5-0-flash"), 502, "upstream_error", False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc_type", [httpx.ReadTimeout, httpx.WriteTimeout])
+async def test_seedream_submitted_timeout_is_not_retried(client, app, exc_type):
+    app.state.settings.ark_api_key = "k"
+    transport = RaisingTransport(exc_type)
+    use_transport(app, transport)
+    assert_error(await post(client, model="doubao-seedream-5-0-flash"), 504, "upstream_timeout", True)
+    assert transport.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_seedream_connection_timeout_still_retries(client, app):
+    app.state.settings.ark_api_key = "k"
+    transport = RaisingTransport(httpx.ConnectTimeout)
+    use_transport(app, transport)
+    assert_error(await post(client, model="doubao-seedream-5-0-flash"), 504, "upstream_timeout", True)
+    assert transport.call_count == generator.MAX_RETRIES + 1
+
+
 # --- Request-level ----------------------------------------------------------
 
 

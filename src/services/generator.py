@@ -102,17 +102,11 @@ def _google_search_tool(search_types: tuple[str, ...]) -> dict:
 # they surface as an HTTP error instead of a 200 with finish_reason=content_filter.
 _GEMINI_SAFETY_MARKERS = ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST")
 
-# Seedream image-size constraints. 4.5 and 5.0 Lite reject any size below
-# 3,686,400 px ("image size must be at least 3686400 pixels"); 4.0 also accepts
-# these dimensions, and 5.0 Pro / Flash accept areas in [921,600, 4,624,220]
-# (verified 2026-10-11), so a single floor keeps the size logic model-agnostic
-# as long as results stay under ARK_MAX_PIXELS. Sides are aligned to 32px and
-# clamped to Ark's [1024, 4096] per-side range.
-ARK_MIN_PIXELS = 3_686_400  # e.g. 2560x1440 (16:9), 1920x1920 (1:1)
-ARK_MAX_PIXELS = 4_624_220  # 5.0 Pro / Flash ceiling
-ARK_MIN_SIDE = 1024
-ARK_MAX_SIDE = 4096
+# Seedream limits apply to total pixels and ratio, not each side. Keep the
+# 32px grid used by our existing integration, without clamping long images.
 ARK_SIZE_ALIGN = 32
+ARK_MAX_RATIO = 16
+ARK_PRO_LOW_PRICE_PIXELS = 2_610_000
 
 
 def _parse_ratio(value: str | None) -> tuple[int, int] | None:
@@ -134,32 +128,33 @@ def _ceil_align(value: float) -> int:
     return int(math.ceil(value / ARK_SIZE_ALIGN) * ARK_SIZE_ALIGN)
 
 
-def _resolve_ark_size(aspect_ratio: str | None, size: str | None) -> str:
-    """Compute an explicit ``WxH`` Ark size that preserves the requested aspect
-    ratio and meets Seedream's minimum pixel budget.
+def _resolve_ark_size(aspect_ratio: str | None, size: str | None, model: str = "doubao-seedream-4-5") -> str:
+    """Use size's pixel budget and aspect_ratio's shape within this model's limits.
 
-    Hardcoding a tier like ``"2K"`` lets Seedream pick the aspect ratio per
-    image, producing inconsistent landscape/portrait output. Passing explicit
-    dimensions locks the orientation the caller asked for. The aspect ratio is
-    preferred over ``size`` because callers may cap ``size`` (e.g. 2048/side).
+    Align the short side first, then derive the long side from it so extreme
+    ratios survive rounding. Pro requests in the cheaper pixel tier stay there.
     """
+    info = SUPPORTED_MODELS[model]
     aw, ah = _parse_ratio(aspect_ratio) or _parse_ratio(size) or (1, 1)
     ratio = aw / ah
-    # Exact dims hitting the pixel floor, then round each side up to the 32px
-    # grid (rounding up only increases the count, so the floor still holds).
-    height = math.sqrt(ARK_MIN_PIXELS / ratio)
-    width = ratio * height
-    w = min(max(_ceil_align(width), ARK_MIN_SIDE), ARK_MAX_SIDE)
-    h = min(max(_ceil_align(height), ARK_MIN_SIDE), ARK_MAX_SIDE)
-    # Extreme ratios can clamp a side and dip back under the floor; bump the
-    # smaller side until the budget is met or both sides hit the ceiling.
-    while w * h < ARK_MIN_PIXELS:
-        if w <= h and w < ARK_MAX_SIDE:
-            w += ARK_SIZE_ALIGN
-        elif h < ARK_MAX_SIDE:
-            h += ARK_SIZE_ALIGN
-        else:
-            break
+    if not 1 / ARK_MAX_RATIO <= ratio <= ARK_MAX_RATIO:
+        raise GenerationError(
+            ErrorCode.INVALID_PARAMS,
+            "Seedream aspect_ratio must be between 1:16 and 16:1.",
+            fields=["aspect_ratio"],
+        )
+    sw, sh = _parse_ratio(size) or (1024, 1024)
+    target = min(max(sw * sh, info.ark_min_pixels), info.ark_max_pixels)
+    ceiling = info.ark_max_pixels
+    if model == "doubao-seedream-5-0-pro" and target <= ARK_PRO_LOW_PRICE_PIXELS:
+        ceiling = min(ceiling, ARK_PRO_LOW_PRICE_PIXELS)
+    long_ratio = max(ratio, 1 / ratio)
+    short = _ceil_align(math.sqrt(target / long_ratio))
+    long = _ceil_align(short * long_ratio)
+    while short * long > ceiling:
+        short -= ARK_SIZE_ALIGN
+        long = _ceil_align(short * long_ratio)
+    w, h = (long, short) if ratio >= 1 else (short, long)
     return f"{w}x{h}"
 
 
@@ -170,6 +165,8 @@ async def _post_with_retries(
     model: str,
     provider: str,
     http_client: httpx.AsyncClient | None = None,
+    *,
+    retry_timeouts: bool = True,
 ) -> httpx.Response:
     """POST with bounded retries on timeout/connect errors.
 
@@ -187,14 +184,16 @@ async def _post_with_retries(
                 async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
                     resp = await client.post(url, headers=headers, json=payload)
             break  # Success, exit retry loop
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as e:
             logger.warning("upstream_timeout", provider=provider, model=model, attempt=attempt)
-            if attempt < MAX_RETRIES + 1:
+            safe_to_retry = retry_timeouts or isinstance(e, (httpx.ConnectTimeout, httpx.PoolTimeout))
+            if safe_to_retry and attempt < MAX_RETRIES + 1:
                 await asyncio.sleep(2)
                 continue
             raise GenerationError(
                 ErrorCode.UPSTREAM_TIMEOUT,
-                upstream_detail=f"{provider} timed out after {MAX_RETRIES + 1} attempts",
+                upstream_detail=f"{provider} timed out after {attempt} attempts",
+                maybe_billed=not safe_to_retry,
             ) from None
         except httpx.ConnectError:
             logger.warning("upstream_connect_error", provider=provider, model=model, attempt=attempt)
@@ -276,7 +275,12 @@ def _ark_http_error(resp: httpx.Response) -> GenerationError:
     # OutputImageSensitiveContentDetected (per Volcengine docs; not yet seen live).
     ark_code, message = _upstream_error_fields(resp)
     status = resp.status_code
-    code = ErrorCode.CONTENT_FILTERED if "SensitiveContent" in ark_code else _status_error_code(status)
+    if "SensitiveContent" in ark_code:
+        code = ErrorCode.CONTENT_FILTERED
+    elif status == 403 and ark_code in {"AccountOverdueError", "OperationDenied.ServiceOverdue"}:
+        code = ErrorCode.UPSTREAM_UNAVAILABLE
+    else:
+        code = _status_error_code(status)
     return GenerationError(code, upstream_status=status, upstream_detail=f"{ark_code}: {message}".strip(": "))
 
 
@@ -395,7 +399,7 @@ async def call_seedream_images(
     size: str | None = None,
     reference_images: list[ReferenceImage] | None = None,
 ) -> tuple[bytes, str]:
-    """Call Volcengine Ark (OpenAI Images API) for Seedream; return (image_bytes, 'jpeg')."""
+    """Call Volcengine Ark for Seedream; return image bytes and detected format."""
     if not settings.ark_api_key:
         raise GenerationError(ErrorCode.CONFIG_MISSING, upstream_detail="ARK_API_KEY is not configured")
 
@@ -407,7 +411,7 @@ async def call_seedream_images(
     payload = {
         "model": info.ark_model_id or settings.ark_model_id,
         "prompt": content,
-        "size": _resolve_ark_size(aspect_ratio, size),
+        "size": _resolve_ark_size(aspect_ratio, size, model),
         "response_format": "b64_json",
         "watermark": False,
     }
@@ -423,17 +427,25 @@ async def call_seedream_images(
         "Authorization": f"Bearer {settings.ark_api_key}",
     }
 
-    resp = await _post_with_retries(url, headers, payload, model=model, provider="ark", http_client=http_client)
+    _log_fields.get({}).update(ark_model=payload["model"], ark_size=payload["size"])
+    resp = await _post_with_retries(
+        url, headers, payload, model=model, provider="ark", http_client=http_client, retry_timeouts=False
+    )
+    _log_fields.get({})["ark_request_id"] = resp.headers.get("x-tt-logid") or resp.headers.get("x-request-id")
 
     if resp.status_code != 200:
         raise _ark_http_error(resp)
 
     data = _json_body(resp, "ark")
+    _log_fields.get({})["ark_usage"] = data.get("usage")
     items = data.get("data", [])
     if items:
         b64_data = items[0].get("b64_json")
         if b64_data:
-            return base64.b64decode(b64_data), "jpeg"
+            image_bytes = base64.b64decode(b64_data)
+            mime = _sniff_mime(image_bytes)
+            _log_fields.get({})["ark_output_size"] = items[0].get("size")
+            return image_bytes, mime.split("/")[-1] if mime else "jpeg"
 
     raise GenerationError(ErrorCode.NO_IMAGE_RETURNED, upstream_detail="no b64_json in Ark response")
 
@@ -660,6 +672,22 @@ def _check_aspect_ratio(model: str, aspect_ratio: str, field: str) -> None:
             f"aspect_ratio '{aspect_ratio}' is not supported by {model}. Supported: {', '.join(allowed)}.",
             fields=[field],
         )
+    if SUPPORTED_MODELS[model].endpoint_type == "images" and not _supports_aspect_ratio(model, aspect_ratio):
+        raise GenerationError(
+            ErrorCode.INVALID_PARAMS,
+            "Seedream aspect_ratio must be between 1:16 and 16:1.",
+            fields=[field],
+        )
+
+
+def _supports_aspect_ratio(model: str, aspect_ratio: str) -> bool:
+    info = SUPPORTED_MODELS[model]
+    if info.aspect_ratios is not None:
+        return aspect_ratio in info.aspect_ratios
+    if info.endpoint_type == "images":
+        ratio = _parse_ratio(aspect_ratio)
+        return ratio is not None and 1 / ARK_MAX_RATIO <= ratio[0] / ratio[1] <= ARK_MAX_RATIO
+    return True
 
 
 def _validate(request: GenerateRequest, model: str) -> None:
@@ -691,8 +719,7 @@ def _resolve_fallback(request: GenerateRequest, model: str, settings: Settings) 
         chain = [
             m
             for m in settings.default_fallback_models
-            if m != model
-            and (SUPPORTED_MODELS[m].aspect_ratios is None or request.aspect_ratio in SUPPORTED_MODELS[m].aspect_ratios)
+            if m != model and _supports_aspect_ratio(m, request.aspect_ratio)
         ]
         return chain, "default" if chain else "none"
     if fallback not in SUPPORTED_MODELS:

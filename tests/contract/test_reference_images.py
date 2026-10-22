@@ -31,6 +31,7 @@ class Web(httpx.AsyncBaseTransport):
             "https://img.example.com/b.jpg": httpx.Response(200, content=JPEG, headers={"content-type": "image/jpeg"}),
         }
         self.gemini = (200, make_gemini_response())
+        self.ark = (200, make_seedream_response())
         # DNS-over-HTTPS answers by host name; a Response / Exception replaces the answer.
         self.doh: dict[str, list[str] | httpx.Response | Exception] = {}
         self.requests: list[httpx.Request] = []
@@ -60,7 +61,8 @@ class Web(httpx.AsyncBaseTransport):
         if request.url.host == DOH_HOST:
             return self._doh(request)
         if request.url.path.endswith("/images/generations"):
-            return httpx.Response(200, json=make_seedream_response())
+            status, body = self.ark
+            return httpx.Response(status, json=body)
         if request.url.path.endswith("/chat/completions"):
             status, body = self.gemini
             return httpx.Response(status, json=body)
@@ -117,16 +119,16 @@ async def test_gemini_without_references_keeps_plain_content(client, web):
 
 
 @pytest.mark.asyncio
-async def test_seedream_single_reference_is_a_string(client, web):
-    await post(client, model=SEEDREAM, reference_images=["https://img.example.com/a.png"])
+@pytest.mark.parametrize("model", [SEEDREAM, "doubao-seedream-5-0-flash", "doubao-seedream-5-0-pro"])
+async def test_seedream_single_reference_is_a_string(client, web, model):
+    await post(client, model=model, reference_images=["https://img.example.com/a.png"])
     assert web.sent("ark")[0]["image"] == data_uri("image/png", PNG)
 
 
 @pytest.mark.asyncio
-async def test_seedream_multiple_references_are_a_list(client, web):
-    await post(
-        client, model=SEEDREAM, reference_images=["https://img.example.com/a.png", "https://img.example.com/b.jpg"]
-    )
+@pytest.mark.parametrize("model", [SEEDREAM, "doubao-seedream-5-0-flash", "doubao-seedream-5-0-pro"])
+async def test_seedream_multiple_references_are_a_list(client, web, model):
+    await post(client, model=model, reference_images=["https://img.example.com/a.png", "https://img.example.com/b.jpg"])
     assert web.sent("ark")[0]["image"] == [data_uri("image/png", PNG), data_uri("image/jpeg", JPEG)]
 
 
@@ -145,6 +147,24 @@ async def test_fallback_reuses_downloaded_references(client, web):
     assert data["fallback_used"] is True
     assert web.sent("ark")[0]["image"] == data_uri("image/png", PNG)
     assert web.fetched() == ["https://img.example.com/a.png"]  # downloaded once
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["doubao-seedream-5-0-flash", "doubao-seedream-5-0-pro"])
+async def test_seedream_primary_fallback_reuses_downloaded_references(client, web, model):
+    web.ark = (403, {"error": {"code": "AccountOverdueError", "message": "overdue"}})
+    response = await post(
+        client,
+        model=model,
+        fallback_model="gemini-nano-banana-2.1",
+        reference_images=["https://img.example.com/a.png"],
+    )
+    assert response.status_code == 200
+    assert response.json()["fallback_used"] is True
+    assert web.sent("ark")[0]["image"] == data_uri("image/png", PNG)
+    content = web.sent("gemini")[0]["messages"][0]["content"]
+    assert content[1]["image_url"]["url"] == data_uri("image/png", PNG)
+    assert web.fetched() == ["https://img.example.com/a.png"]
 
 
 @pytest.mark.asyncio

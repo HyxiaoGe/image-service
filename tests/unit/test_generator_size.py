@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.generator import ARK_MAX_PIXELS, ARK_MIN_PIXELS, _resolve_ark_size
+from src.config import SUPPORTED_MODELS
+from src.models.errors import ErrorCode
+from src.services.generator import ARK_PRO_LOW_PRICE_PIXELS, GenerationError, _resolve_ark_size
 
 
 def _dims(size: str) -> tuple[int, int]:
@@ -47,16 +49,20 @@ def test_resolve_ark_size_ignores_garbage():
 
 @pytest.mark.parametrize(
     "aspect_ratio",
-    ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "2:3", "3:2", "7:5", "1:4", "4:1", "1:8", "8:1", "1:30"],
+    ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "2:3", "3:2", "7:5", "1:4", "4:1", "1:8", "8:1", "1:16", "16:1"],
 )
-def test_resolve_ark_size_always_meets_pixel_floor(aspect_ratio: str):
-    w, h = _dims(_resolve_ark_size(aspect_ratio, None))
-    assert w * h >= ARK_MIN_PIXELS
-    # Seedream 5.0 Pro / Flash reject areas above 4,624,220 px.
-    assert w * h <= ARK_MAX_PIXELS
-    # Every side stays on the 32px alignment grid and within Ark's bounds.
+@pytest.mark.parametrize(
+    "model", ["doubao-seedream-4-5", "doubao-seedream-5-0-lite", "doubao-seedream-5-0-pro", "doubao-seedream-5-0-flash"]
+)
+@pytest.mark.parametrize("size", ["1024x1024", "1536x1536", "2048x2048"])
+def test_resolve_ark_size_respects_model_limits_and_ratio(aspect_ratio: str, model: str, size: str):
+    w, h = _dims(_resolve_ark_size(aspect_ratio, size, model))
+    info = SUPPORTED_MODELS[model]
+    assert info.ark_min_pixels <= w * h <= info.ark_max_pixels
     assert w % 32 == 0 and h % 32 == 0
-    assert 1024 <= w <= 4096 and 1024 <= h <= 4096
+    aw, ah = map(int, aspect_ratio.split(":"))
+    assert w / h == pytest.approx(aw / ah, rel=0.035)
+    assert 1 / 16 <= w / h <= 16
 
 
 def test_resolve_ark_size_preserves_orientation():
@@ -70,3 +76,30 @@ def test_resolve_ark_size_preserves_orientation():
 def test_resolve_ark_size_ignores_oversized_digits():
     # Digit runs past Python's 4300-digit int() limit must fall back, not raise.
     assert _resolve_ark_size("1" * 5000 + ":1", "1" * 5000 + "x1") == "1920x1920"
+
+
+@pytest.mark.parametrize("model", ["doubao-seedream-5-0-pro", "doubao-seedream-5-0-flash"])
+@pytest.mark.parametrize("side", [1024, 1536, 2048])
+def test_modern_seedream_honors_square_pixel_budget(model, side):
+    assert _resolve_ark_size("1:1", f"{side}x{side}", model) == f"{side}x{side}"
+
+
+@pytest.mark.parametrize("ratio", ["4:1", "8:1", "16:1", "1:4", "1:8", "1:16"])
+def test_extreme_seedream_ratios_are_not_clamped_to_four(ratio):
+    w, h = _dims(_resolve_ark_size(ratio, "1536x1536", "doubao-seedream-5-0-pro"))
+    aw, ah = map(int, ratio.split(":"))
+    assert w / h == aw / ah
+
+
+@pytest.mark.parametrize("ratio", ["1:1", "16:9", "7:5", "11:10", "8:1", "16:1"])
+def test_pro_rounding_does_not_cross_low_price_boundary(ratio):
+    w, h = _dims(_resolve_ark_size(ratio, "1615x1615", "doubao-seedream-5-0-pro"))
+    assert w * h <= ARK_PRO_LOW_PRICE_PIXELS
+
+
+@pytest.mark.parametrize("ratio", ["1:17", "17:1"])
+def test_seedream_out_of_range_ratio_is_rejected(ratio):
+    with pytest.raises(GenerationError) as exc:
+        _resolve_ark_size(ratio, None, "doubao-seedream-5-0-flash")
+    assert exc.value.code == ErrorCode.INVALID_PARAMS
+    assert exc.value.fields == ["aspect_ratio"]

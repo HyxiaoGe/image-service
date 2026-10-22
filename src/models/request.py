@@ -12,8 +12,12 @@ MAX_REFERENCE_IMAGES = 3
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=10000, description="Text prompt")
     model: str | None = Field(None, description="Image model ID; see GET /v1/models. Uses default if omitted.")
-    aspect_ratio: str = Field("1:1", description="Aspect ratio e.g. 16:9")
-    size: str = Field("1024x1024", description="Dimensions as WxH")
+    aspect_ratio: str = Field("1:1", description="Aspect ratio e.g. 16:9. Seedream range: 1:16 to 16:1.")
+    size: str = Field(
+        "1024x1024",
+        description="Pixel budget as WxH; aspect_ratio controls shape. Seedream fits the budget to its model's "
+        "limits; Gemini does not use size. Default 1024x1024.",
+    )
     style: str | None = Field(None, description="Style hint e.g. watercolor")
     fallback_model: str | None = Field(
         None,
@@ -72,6 +76,8 @@ class GenerateRequest(BaseModel):
     def validate_aspect_ratio(cls, v: str) -> str:
         if not re.fullmatch(r"\d{1,5}:\d{1,5}", v):
             raise ValueError("aspect_ratio must match pattern N:N (e.g. 16:9)")
+        if any(int(side) == 0 for side in v.split(":")):
+            raise ValueError("aspect_ratio dimensions must be positive")
         return v
 
     @field_validator("size")

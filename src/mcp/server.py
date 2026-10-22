@@ -73,7 +73,9 @@ async def generate_image(
         prompt: Text description of the image to generate.
         model: Image model ID (optional, uses default if omitted). See list_models.
         aspect_ratio: Aspect ratio e.g. '16:9', '1:1'. Default '1:1'.
-        size: Output dimensions as 'WxH'. Default '1024x1024'.
+        size: Pixel budget as 'WxH'; aspect_ratio controls shape. Seedream fits
+            this to its model's pixel limits. Gemini ignores size. Default
+            '1024x1024'; use '1536x1536' for about 1.5K or '2048x2048' for about 2K.
         style: Style hint e.g. 'watercolor', 'photorealistic' (optional).
         fallback_model: Model to retry with if `model`'s content filter blocks the
             request or its provider is unavailable. Omit to use the service's
@@ -166,7 +168,9 @@ async def list_models() -> str:
     """List available image generation models."""
     lines = ["Available models:", ""]
     for i, model_info in enumerate(SUPPORTED_MODELS.values(), 1):
-        ratios = ", ".join(model_info.aspect_ratios) if model_info.aspect_ratios else "any W:H"
+        ratios = ", ".join(model_info.aspect_ratios) if model_info.aspect_ratios else "continuous W:H"
+        if model_info.endpoint_type == "images":
+            ratios = "1:16 to 16:1"
         lines.append(
             f"{i}. {model_info.name} ({model_info.id}) — {model_info.provider} — aspect ratios: {ratios}"
             + (f" — grounding: {' + '.join(model_info.search_types)} search" if model_info.grounding else "")

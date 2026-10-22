@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from src.services import generator
-from tests.conftest import MockTransport
+from tests.conftest import MockTransport, make_seedream_response
 
 PROMPT = "a very secret prompt about lighthouses"
 
@@ -79,3 +79,29 @@ async def test_unexpected_exception_logged_with_traceback(client, app, log, monk
     [(level, entry)] = log.finished()
     assert level == "exception"
     assert entry["error_code"] == "internal_error"
+
+
+@pytest.mark.asyncio
+async def test_seedream_summary_records_actual_upstream_specification(client, app, log):
+    app.state.settings.ark_api_key = "k"
+    body = make_seedream_response()
+    body["usage"] = {"generated_images": 1, "output_tokens": 9216}
+    body["data"][0]["size"] = "1536x1536"
+
+    def respond(request):
+        return httpx.Response(200, json=body, headers={"x-tt-logid": "ark-trace-123"})
+
+    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+
+    response = await client.post(
+        "/v1/generate", json={"prompt": PROMPT, "model": "doubao-seedream-5-0-flash", "size": "1536x1536"}
+    )
+
+    assert response.status_code == 200
+    [(level, entry)] = log.finished()
+    assert level == "info"
+    assert entry["ark_model"] == "doubao-seedream-5-0-flash-260915"
+    assert entry["ark_size"] == entry["ark_output_size"] == "1536x1536"
+    assert entry["ark_usage"] == body["usage"]
+    assert entry["ark_request_id"] == "ark-trace-123"
+    assert PROMPT not in str(entry)

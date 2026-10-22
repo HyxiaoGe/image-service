@@ -138,14 +138,16 @@ async def test_generate_seedream_request_body(client: httpx.AsyncClient, app):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model", "wire_id"),
+    ("model", "wire_id", "expected_size"),
     [
-        ("doubao-seedream-5-0-pro", "doubao-seedream-5-0-pro-260628"),
-        ("doubao-seedream-5-0-flash", "doubao-seedream-5-0-flash-260915"),
-        ("doubao-seedream-5-0-lite", "doubao-seedream-5-0-260128"),
+        ("doubao-seedream-5-0-pro", "doubao-seedream-5-0-pro-260628", "1376x768"),
+        ("doubao-seedream-5-0-flash", "doubao-seedream-5-0-flash-260915", "1376x768"),
+        ("doubao-seedream-5-0-lite", "doubao-seedream-5-0-260128", "2560x1440"),
     ],
 )
-async def test_generate_seedream_50_request_body(client: httpx.AsyncClient, app, model: str, wire_id: str):
+async def test_generate_seedream_50_request_body(
+    client: httpx.AsyncClient, app, model: str, wire_id: str, expected_size: str
+):
     """5.0 models send their pinned wire id and omit sequential_image_generation (Ark 400s on it)."""
     app.state.settings.ark_api_key = "test-ark-key"
     transport = MockTransport(response_data=make_seedream_response())
@@ -159,7 +161,7 @@ async def test_generate_seedream_50_request_body(client: httpx.AsyncClient, app,
     assert sent["model"] == wire_id
     assert "sequential_image_generation" not in sent
     assert sent["watermark"] is False
-    assert sent["size"] == "2560x1440"
+    assert sent["size"] == expected_size
 
 
 @pytest.mark.asyncio

@@ -127,4 +127,4 @@ async def test_list_models_shows_aspect_ratios(app):
     flash_line = next(line for line in text.splitlines() if "gemini-3.1-flash-image-preview" in line)
     assert "1:8" in flash_line and "21:9" in flash_line
     seedream_line = next(line for line in text.splitlines() if "doubao-seedream-4-5" in line)
-    assert "any" in seedream_line
+    assert "1:16 to 16:1" in seedream_line

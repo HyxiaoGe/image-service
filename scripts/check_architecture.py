@@ -43,7 +43,7 @@ def get_layer(filepath: Path) -> str | None:
 
 def extract_src_imports(filepath: Path) -> list[tuple[int, str]]:
     """Return list of (line_number, imported_module) for src.* imports."""
-    source = filepath.read_text()
+    source = filepath.read_text(encoding="utf-8")
     try:
         tree = ast.parse(source, filename=str(filepath))
     except SyntaxError:

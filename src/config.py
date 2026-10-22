@@ -28,12 +28,14 @@ class ModelInfo:
         search_types: tuple[SearchType, ...] = (),
         ark_model_id: str | None = None,
         sequential_param: bool = False,
+        ark_min_pixels: int = 3_686_400,
+        ark_max_pixels: int = 16_777_216,
     ) -> None:
         self.id = id
         self.name = name
         self.provider = provider
         self.endpoint_type = endpoint_type
-        # None = any W:H ratio (Seedream / Qwen-Image map it to explicit pixel dimensions).
+        # None = continuous ratios, subject to the provider's limits.
         self.aspect_ratios = aspect_ratios
         # Google Search types the model accepts for grounding (verified via LiteLLM
         # on 2026-10-11). gemini-2.5-flash-image rejects search entirely ("Search as
@@ -42,9 +44,10 @@ class ModelInfo:
         self.search_types = search_types
         # Seedream only: pinned Ark wire id; None runs Settings.ark_model_id.
         self.ark_model_id = ark_model_id
-        # Seedream 4.x accepts sequential_image_generation; 5.0 rejects it with
-        # HTTP 400 ("not supported by the current model").
+        # Pro / Flash reject sequential_image_generation; 4.x and Lite support it.
         self.sequential_param = sequential_param
+        self.ark_min_pixels = ark_min_pixels
+        self.ark_max_pixels = ark_max_pixels
 
     @property
     def grounding(self) -> bool:
@@ -108,6 +111,8 @@ SUPPORTED_MODELS: dict[str, ModelInfo] = {
         provider="Volcano",
         endpoint_type="images",
         ark_model_id="doubao-seedream-5-0-pro-260628",
+        ark_min_pixels=921_600,
+        ark_max_pixels=4_624_220,
     ),
     "doubao-seedream-5-0-flash": ModelInfo(
         id="doubao-seedream-5-0-flash",
@@ -115,6 +120,8 @@ SUPPORTED_MODELS: dict[str, ModelInfo] = {
         provider="Volcano",
         endpoint_type="images",
         ark_model_id="doubao-seedream-5-0-flash-260915",
+        ark_min_pixels=921_600,
+        ark_max_pixels=4_624_220,
     ),
     "doubao-seedream-5-0-lite": ModelInfo(
         id="doubao-seedream-5-0-lite",
@@ -162,11 +169,11 @@ class Settings(BaseSettings):
     litellm_api_key: str = Field("", description="LiteLLM Virtual Key")
     # Main / backup models when the caller omits model / fallback_model. Switch
     # them by editing these env vars and restarting (see README).
-    default_model: str = "gemini-nano-banana-2.1"
+    default_model: str = "doubao-seedream-5-0-flash"
     # Comma-separated backup chain, tried in order when the caller passes no
     # fallback_model (see FALLBACK_CODES in generator for what triggers it).
     default_fallback_model: str | None = Field(
-        "doubao-seedream-5-0-pro,qwen-image-3.0",
+        "gemini-nano-banana-2.1,qwen-image-3.0",
         description="Comma-separated backup models, tried in order when the caller passes no fallback_model; "
         "empty disables",
     )
@@ -227,6 +234,12 @@ class Settings(BaseSettings):
         if self.default_model not in SUPPORTED_MODELS:
             raise ValueError(f"DEFAULT_MODEL '{self.default_model}' is not a supported model")
         chain = self.default_fallback_models
+        # Existing installations may pin Gemini as primary while inheriting the
+        # new default chain. Only implicit defaults may drop the primary; an
+        # explicitly configured self-fallback still fails startup as before.
+        if self.default_model in chain and "default_fallback_model" not in self.model_fields_set:
+            chain = tuple(m for m in chain if m != self.default_model)
+            self.default_fallback_model = ",".join(chain) or None
         for fallback in chain:
             if fallback not in SUPPORTED_MODELS:
                 raise ValueError(f"DEFAULT_FALLBACK_MODEL '{fallback}' is not a supported model")

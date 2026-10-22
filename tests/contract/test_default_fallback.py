@@ -134,8 +134,22 @@ def test_settings_empty_fallback_disables(monkeypatch):
 
 def test_settings_defaults():
     s = Settings(_env_file=None)
-    assert s.default_model == "gemini-nano-banana-2.1"
-    assert s.default_fallback_models == ("doubao-seedream-5-0-pro", "qwen-image-3.0")
+    assert s.default_model == "doubao-seedream-5-0-flash"
+    assert s.default_fallback_models == ("gemini-nano-banana-2.1", "qwen-image-3.0")
+
+
+def test_existing_primary_can_inherit_new_default_chain():
+    s = Settings(_env_file=None, default_model="gemini-nano-banana-2.1")
+    assert s.default_fallback_models == ("qwen-image-3.0",)
+
+
+def test_explicit_primary_in_backup_chain_still_rejected():
+    with pytest.raises(ValueError, match="differ"):
+        Settings(
+            _env_file=None,
+            default_model="gemini-nano-banana-2.1",
+            default_fallback_model="gemini-nano-banana-2.1,qwen-image-3.0",
+        )
 
 
 def test_settings_parse_fallback_chain():

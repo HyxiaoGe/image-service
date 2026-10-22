@@ -42,6 +42,10 @@ def compute_cache_key(
     raw = f"{CACHE_KEY_VERSION}:{prompt.strip().lower()}:{model.lower()}:{aspect_ratio}:{size}:{style_part}"
     if fallback_model:
         raw += f":fallback={fallback_model.lower()}"
+    # Seedream now uses each model's pixel budget and preserves extreme ratios.
+    # Invalidate old results even when Seedream is only a possible fallback.
+    if any(m.startswith("doubao-seedream-") for m in (model, *(fallback_model or "").split(","))):
+        raw += ":seedream-size=v1"
     if grounding:
         raw += ":grounding"
     if reference_images:

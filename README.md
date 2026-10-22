@@ -20,13 +20,13 @@
 
 <table>
   <tr>
-    <td align="center"><img src="docs/images/lighthouse-nano-banana-2.1.jpg" alt="gemini-nano-banana-2.1"><br><sub><code>gemini-nano-banana-2.1</code>（默认）</sub></td>
+    <td align="center"><img src="docs/images/lighthouse-nano-banana-2.1.jpg" alt="gemini-nano-banana-2.1"><br><sub><code>gemini-nano-banana-2.1</code>（默认备用）</sub></td>
     <td align="center"><img src="docs/images/lighthouse-gemini-3.1-flash-image.jpg" alt="gemini-3.1-flash-image"><br><sub><code>gemini-3.1-flash-image</code></sub></td>
     <td align="center"><img src="docs/images/lighthouse-gemini-3-pro-image.jpg" alt="gemini-3-pro-image"><br><sub><code>gemini-3-pro-image</code></sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/images/lighthouse-seedream-5-0-pro.jpg" alt="doubao-seedream-5-0-pro"><br><sub><code>doubao-seedream-5-0-pro</code>（默认备用）</sub></td>
-    <td align="center"><img src="docs/images/lighthouse-seedream-5-0-flash.jpg" alt="doubao-seedream-5-0-flash"><br><sub><code>doubao-seedream-5-0-flash</code></sub></td>
+    <td align="center"><img src="docs/images/lighthouse-seedream-5-0-pro.jpg" alt="doubao-seedream-5-0-pro"><br><sub><code>doubao-seedream-5-0-pro</code>（按需选择）</sub></td>
+    <td align="center"><img src="docs/images/lighthouse-seedream-5-0-flash.jpg" alt="doubao-seedream-5-0-flash"><br><sub><code>doubao-seedream-5-0-flash</code>（默认）</sub></td>
     <td align="center"><img src="docs/images/lighthouse-seedream-5-0-lite.jpg" alt="doubao-seedream-5-0-lite"><br><sub><code>doubao-seedream-5-0-lite</code></sub></td>
   </tr>
 </table>
@@ -47,6 +47,7 @@
 - [快速开始](#快速开始)
 - [切换主力 / 备用模型](#切换主力--备用模型)
 - [支持的模型](#支持的模型)
+- [Seedream 的尺寸](#seedream-的尺寸)
 - [参考图（reference_images）](#参考图reference_images)
 - [自动找参考图（reference_subject）](#自动找参考图reference_subject)
 
@@ -71,9 +72,9 @@ curl -s http://localhost:8090/v1/generate \
 ```json
 {
   "id": "…",
-  "image_url": "/static/images/<id>.png",
-  "model": "gemini-nano-banana-2.1",
-  "requested_model": "gemini-nano-banana-2.1",
+  "image_url": "/static/images/<id>.jpeg",
+  "model": "doubao-seedream-5-0-flash",
+  "requested_model": "doubao-seedream-5-0-flash",
   "fallback_used": false,
   "grounding_used": false,
   "cached": false,
@@ -103,8 +104,8 @@ python scripts/check_architecture.py                                  # 分层�
 
 | 环境变量 | 当前取值 | 作用 |
 |---|---|---|
-| `DEFAULT_MODEL` | `gemini-nano-banana-2.1` | 默认出图模型 |
-| `DEFAULT_FALLBACK_MODEL` | `doubao-seedream-5-0-pro,qwen-image-3.0` | 备用模型候选列表（逗号分隔，按顺序尝试）；留空表示不启用默认备用 |
+| `DEFAULT_MODEL` | `doubao-seedream-5-0-flash` | 默认出图模型 |
+| `DEFAULT_FALLBACK_MODEL` | `gemini-nano-banana-2.1,qwen-image-3.0` | 备用模型候选列表（逗号分隔，按顺序尝试）；留空表示不启用默认备用 |
 
 切换步骤（不需要改代码）：
 
@@ -116,18 +117,20 @@ docker compose up -d --force-recreate   # 重新创建容器才会加载新的 .
 curl -s localhost:8090/v1/health
 ```
 
-例如让 Seedream 当主力、Gemini 当备用：
+例如使用 Flash 当主力、Gemini 和 Qwen 当备用（默认配置）：
 
 ```
-DEFAULT_MODEL=doubao-seedream-5-0-pro
+DEFAULT_MODEL=doubao-seedream-5-0-flash
 DEFAULT_FALLBACK_MODEL=gemini-nano-banana-2.1,qwen-image-3.0
 ```
 
 说明：
 
 - 所有值必须是 `GET /v1/models` 里的模型 ID；备用列表不能包含 `DEFAULT_MODEL`，也不能重复。填错时服务启动失败，日志会写明是哪个变量。
-- 触发换下一个模型的情况：被内容审核拦截（`content_filtered`），或上游不可用（`upstream_unavailable`：402 余额用尽、429、5xx、连不上）。按列表顺序逐个尝试，某个成功就停；全部失败时返回最后一个模型的错误，`fallback_from` 写明主模型最初的失败原因。
+- 未设置 `DEFAULT_FALLBACK_MODEL` 时，内置备用链会去掉已经选作默认主模型的那一项，兼容仍显式使用 Gemini 的现有部署；显式配置的备用列表仍按上一条严格校验。
+- 触发换下一个模型的情况：被内容审核拦截（`content_filtered`），或上游不可用（`upstream_unavailable`：402 余额用尽、方舟 403 欠费错误、429、5xx、连不上）。按列表顺序逐个尝试，某个成功就停；全部失败时返回最后一个模型的错误，`fallback_from` 写明主模型最初的失败原因。
 - 不换模型的情况：超时（再试一个模型很可能超出调用方的等待时间）、请求参数错误、连接在响应途中断开（上游可能已经出图并计费）。
+- Seedream 提交请求后发生读取或写入超时，也不重发本模型，避免重复生成；建立连接前的超时和连接失败仍最多重试两次。
 - 列表里不适用的模型会自动跳过，不报错：调用方选的模型恰好就是它，或者它不支持所请求的比例（例如 Seedream 主力请求 7:5，Gemini 备用不支持）。
 - 调用方传 `fallback_model` 时只用它这一个模型（同样的触发规则）；传 `"none"` 关闭本次请求的备用。
 - 备用列表参与缓存 key，所以修改 `DEFAULT_FALLBACK_MODEL` 后，已有缓存不会再被命中，同样的请求会重新生成一次。
@@ -139,17 +142,35 @@ DEFAULT_FALLBACK_MODEL=gemini-nano-banana-2.1,qwen-image-3.0
 
 | 模型 ID | 上游 | 说明 |
 |---|---|---|
-| `gemini-nano-banana-2.1` | Gemini | 默认模型，Google 当前最新稳定版；支持网页 + 图片搜索 |
+| `gemini-nano-banana-2.1` | Gemini | 默认第一备用；支持网页 + 图片搜索 |
 | `gemini-3.1-flash-image` | Gemini | Nano Banana 2 稳定版；支持网页 + 图片搜索 |
 | `gemini-3-pro-image` | Gemini | Nano Banana Pro 稳定版；只支持网页搜索 |
-| `doubao-seedream-5-0-pro` | 火山方舟 `doubao-seedream-5-0-pro-260628` | 默认备用模型 |
-| `doubao-seedream-5-0-flash` | 火山方舟 `doubao-seedream-5-0-flash-260915` | 更快更便宜 |
-| `doubao-seedream-5-0-lite` | 火山方舟 `doubao-seedream-5-0-260128` | |
+| `doubao-seedream-5-0-pro` | 火山方舟 `doubao-seedream-5-0-pro-260628` | 画质优先，按需选择；输出分辨率影响计费档位 |
+| `doubao-seedream-5-0-flash` | 火山方舟 `doubao-seedream-5-0-flash-260915` | 默认主力，优先速度和成本 |
+| `doubao-seedream-5-0-lite` | 火山方舟 `doubao-seedream-5-0-260128` | 官方计划于 2026-11-24 下线 |
 | `qwen-image-3.0-pro` | 阿里云百炼 | 中文文字、长 prompt 排版强；支持 1–3 张参考图；需要 `DASHSCOPE_API_KEY` |
 | `qwen-image-3.0` | 阿里云百炼 | 3.0 标准版，更便宜 |
-| `doubao-seedream-4-5` / `doubao-seedream-4-0` | 火山方舟，由 `ARK_MODEL_ID` 决定（默认 4.5） | 两个别名实际调用同一个版本 |
+| `doubao-seedream-4-5` / `doubao-seedream-4-0` | 火山方舟，由 `ARK_MODEL_ID` 决定（默认 4.5） | 两个别名实际调用同一个版本；当前默认版本计划于 2026-11-24 下线 |
 | `gemini-3.1-flash-image-preview`、`gemini-3-pro-image-preview`、`nano-banana-pro-preview` | Gemini | 预览版，已过 Google 公布的最早下线日期（2026-06-25），随时可能停用，请换成上面的稳定版 |
 | `gemini-2.5-flash-image` | Gemini | 计划 2027-03-15 下线；不支持搜索 |
+
+## Seedream 的尺寸
+
+`aspect_ratio` 决定形状，支持 `1:16` 到 `16:1`；`size` 的宽×高决定像素预算，默认 `1024x1024`。服务按模型上下限及像素对齐调整尺寸，因此返回图片不一定与 `size` 的两边完全相同。
+
+| 模型 / 比例 | 请求 size | 发给方舟的尺寸 |
+|---|---|---|
+| Pro / Flash，1:1 | `1024x1024` | `1024x1024` |
+| Pro / Flash，16:9 | `1024x1024` | `1376x768` |
+| Pro / Flash，16:9 | `1536x1536` | `2048x1152` |
+| Pro / Flash，8:1 | `1536x1536` | `4352x544` |
+| 4.x / Lite，16:9 | `1024x1024` | `2560x1440`（达到旧模型的最低像素要求） |
+
+Pro 的低分辨率预算在对齐后仍保持不超过 261 万像素，避免无意进入更贵的档位；传 `2048x2048` 可使用更高的像素预算。Flash 不按这两档区分每张价格。最新价格见[方舟官方价格](https://docs.volcengine.com/docs/ark/model-pricing?lang=zh)，版本下线时间见[官方公告](https://docs.volcengine.com/docs/ark/model-deprecation-notice?lang=en)。
+
+Pro / Flash 不支持原生联网搜索，`grounding=true` 在这两个模型上不生效。需要真实物件外观时，可使用 `reference_images` 或 `reference_subject`。日志 `ark_model`、`ark_size`、`ark_output_size`、`ark_usage` 和 `ark_request_id` 记录方舟实际版本、输入输出规格、用量及追踪信息。
+
+已部署服务的 `.env` 若显式设置了旧 `DEFAULT_MODEL`，仍优先采用该值；升级代码后需要同步修改配置并重建容器。
 
 ## 参考图（reference_images）
 
