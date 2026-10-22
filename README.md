@@ -84,7 +84,23 @@ curl -s http://localhost:8090/v1/generate \
 }
 ```
 
-REST 返回的 `image_url` 是相对路径，拼上服务地址即可访问；MCP 返回的已经是完整 URL。没有配置 `API_KEY` 时不需要 `Authorization` 头。其他常用参数：`model`、`size`、`style`、`fallback_model`、`grounding`、`reference_images`、`reference_subject`、`no_cache`，完整说明见 `/docs`（FastAPI 自动生成）。
+REST 返回的 `image_url` 是相对路径，拼上服务地址即可访问；MCP 返回的已经是完整 URL。没有配置 `API_KEY` 时不需要 `Authorization` 头。其他常用参数：`model`、`quality`、`size`、`style`、`fallback_model`、`grounding`、`reference_images`、`reference_subject`、`no_cache`，完整说明见 `/docs`（FastAPI 自动生成）。
+
+### 按画质偏好选择模型
+
+REST 和 MCP `generate_image` 都支持可选的 `quality`，由调用方根据用户偏好传入：
+
+| 参数 | 初始模型 | 使用场景 |
+|---|---|---|
+| `quality="standard"` | Seedream 5.0 Flash | 日常配图、草稿、普通海报、常规参考图编辑 |
+| `quality="high"` | Seedream 5.0 Pro | 用户明确要求精修成稿、优先质感，并接受更高费用和等待时间 |
+| 不传 `quality` 和 `model` | `DEFAULT_MODEL` | 保持现有默认行为 |
+
+显式 `model` 优先于 `quality`；Lite 继续通过 `model` 显式选择。`quality` 只决定初始模型，分辨率由 `size` 单独控制。中文、参考图或较长提示词本身不要求 `high`。
+
+例如：`{"prompt":"制作一张咖啡活动海报","quality":"high","aspect_ratio":"3:4","size":"1536x1536"}`。
+
+现有备用规则继续生效：`high` 不保证最终一定由 Pro 出图；需要严格指定模型时可同时传 `fallback_model="none"`。返回的 `requested_model` 是解析后的初始模型，`model` 是实际出图模型。日志 `quality` 与 `model_source`（`model` / `quality` / `default`）记录选择依据；缓存按解析后的模型区分，同一模型的等价请求共享缓存。
 
 **本地开发**
 
@@ -100,7 +116,7 @@ python scripts/check_architecture.py                                  # 分层�
 
 ## 切换主力 / 备用模型
 
-调用方不传 `model` 时用**默认模型**，不传 `fallback_model` 时用**默认备用模型**。调用方显式传入的值始终优先。
+调用方不传 `model` 和 `quality` 时用**默认模型**，不传 `fallback_model` 时用**默认备用模型**。显式 `model` 优先于 `quality`，`quality` 优先于默认模型。
 
 | 环境变量 | 当前取值 | 作用 |
 |---|---|---|

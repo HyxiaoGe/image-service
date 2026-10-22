@@ -46,10 +46,29 @@ async def test_success_then_cached(client, log):
     for entry in (first, second):
         assert entry["entry"] == "rest"
         assert entry["model"] == entry["requested_model"] == "gemini-3-pro-image-preview"
+        assert entry["quality"] is None
+        assert entry["model_source"] == "default"
         assert entry["prompt_len"] == len(PROMPT)
         assert len(entry["prompt_sha8"]) == 8
         assert isinstance(entry["duration_ms"], int)
         assert PROMPT not in str(entry)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", [None, "doubao-seedream-5-0-flash"])
+async def test_quality_selection_is_logged(client, app, log, model):
+    app.state.settings.ark_api_key = "k"
+    app.state.http_client = httpx.AsyncClient(transport=MockTransport(response_data=make_seedream_response()))
+    args = {"prompt": PROMPT, "quality": "high"}
+    if model:
+        args["model"] = model
+
+    assert (await client.post("/v1/generate", json=args)).status_code == 200
+
+    [(_, entry)] = log.finished()
+    assert entry["quality"] == "high"
+    assert entry["model_source"] == ("model" if model else "quality")
+    assert entry["requested_model"] == (model or "doubao-seedream-5-0-pro")
 
 
 @pytest.mark.asyncio

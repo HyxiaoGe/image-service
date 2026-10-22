@@ -33,6 +33,10 @@ logger = structlog.get_logger()
 
 # Appended to the prompt when reference_subject found images (approved wording).
 REFERENCE_HINT = "参考图是 {subject} 的真实照片，外观以它为准。"
+QUALITY_MODELS = {
+    "standard": "doubao-seedream-5-0-flash",
+    "high": "doubao-seedream-5-0-pro",
+}
 
 
 class GenerationError(Exception):
@@ -607,11 +611,18 @@ async def handle_generate(
     started = time.perf_counter()
     _upstream_attempts.set(0)
     _search_stats.set(None)
-    requested_model = request.model or settings.default_model
+    if request.model:
+        requested_model, model_source = request.model, "model"
+    elif request.quality is not None:
+        requested_model, model_source = QUALITY_MODELS[request.quality], "quality"
+    else:
+        requested_model, model_source = settings.default_model, "default"
     fields: dict[str, object] = {
         "request_id": str(uuid.uuid4()),
         "entry": entry,
         "requested_model": requested_model,
+        "quality": request.quality,
+        "model_source": model_source,
         "aspect_ratio": request.aspect_ratio,
         "size": request.size,
         "grounding": request.grounding,

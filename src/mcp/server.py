@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from src.config import SUPPORTED_MODELS, Settings
 from src.models.errors import ERROR_SPECS, ErrorCode, validation_error_fields
-from src.models.request import GenerateRequest
+from src.models.request import GenerateRequest, ImageQuality
 from src.services.cache import CacheService
 from src.services.generator import GenerationError, handle_generate
 
@@ -66,12 +66,13 @@ async def generate_image(
     reference_images: list[str] | None = None,
     reference_subject: str | None = None,
     no_cache: bool = False,
+    quality: ImageQuality | None = None,
 ) -> ToolResult:
     """Generate an image from a text prompt via the image-service backend.
 
     Args:
         prompt: Text description of the image to generate.
-        model: Image model ID (optional, uses default if omitted). See list_models.
+        model: Image model ID (optional). Overrides quality when set. See list_models.
         aspect_ratio: Aspect ratio e.g. '16:9', '1:1'. Default '1:1'.
         size: Pixel budget as 'WxH'; aspect_ratio controls shape. Seedream fits
             this to its model's pixel limits. Gemini ignores size. Default
@@ -98,6 +99,14 @@ async def generate_image(
             real product), search_failed, or skipped (no free reference slot).
         no_cache: Set true to regenerate: skip the cached image for identical
             parameters and produce a new one (it then replaces the cache entry).
+        quality: Model preference: 'standard' selects Seedream 5.0 Flash for
+            everyday images, drafts and routine edits; 'high' selects Seedream
+            5.0 Pro when the user prioritizes polished final images and accepts
+            higher cost and latency. Omit both model and quality to use the
+            service default. Explicit model takes priority. Resolution is set
+            separately with size. Text or reference images alone do not require
+            high. Existing fallback rules apply; the result reports the actual
+            model. Lite remains available through an explicit model ID.
 
     On failure the text starts with "Error generating image [<code>]:" and the
     structured content is {"ok": false, "error": {"code", "message", "retryable", ...}}.
@@ -109,6 +118,7 @@ async def generate_image(
         request = GenerateRequest(
             prompt=prompt,
             model=model,
+            quality=quality,
             aspect_ratio=aspect_ratio,
             size=size,
             style=style,

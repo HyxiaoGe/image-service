@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 # Enough for a few views of one subject (front / back / side); every image is
 # downloaded per request and sent upstream inline, so more costs latency and size.
 MAX_REFERENCE_IMAGES = 3
+ImageQuality = Literal["standard", "high"]
 
 
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=10000, description="Text prompt")
-    model: str | None = Field(None, description="Image model ID; see GET /v1/models. Uses default if omitted.")
+    model: str | None = Field(None, description="Image model ID; see GET /v1/models. Overrides quality when set.")
+    quality: ImageQuality | None = Field(
+        None,
+        description="Model preference: standard selects Seedream 5.0 Flash for everyday images and edits; "
+        "high selects Seedream 5.0 Pro for polished final images, with higher cost and latency. "
+        "Omit both model and quality to use the service default. Explicit model takes priority. "
+        "Resolution is controlled separately by size; text or reference images alone do not require high. "
+        "Fallback rules still apply; model in the response reports the actual producer.",
+    )
     aspect_ratio: str = Field("1:1", description="Aspect ratio e.g. 16:9. Seedream range: 1:16 to 16:1.")
     size: str = Field(
         "1024x1024",
