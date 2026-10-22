@@ -49,6 +49,8 @@
 - [支持的模型](#支持的模型)
 - [Seedream 的尺寸](#seedream-的尺寸)
 - [参考图（reference_images）](#参考图reference_images)
+- [图片编辑](#图片编辑)
+- [版本与 MCP 调用方更新](#版本与-mcp-调用方更新)
 - [自动找参考图（reference_subject）](#自动找参考图reference_subject)
 
 ## 快速开始
@@ -217,6 +219,33 @@ Pro / Flash 不支持原生联网搜索，`grounding=true` 在这两个模型上
 - 下载失败、拿到的不是图片（例如网页）、超过大小上限时，返回 `invalid_params`，`fields=["reference_images"]`，message 会写明是第几张、什么原因。
 - 参考图 URL 会计入缓存 key。同一个 URL 背后的图片如果换了，缓存过期前会一直返回旧结果，需要重新生成时传 `no_cache: true`。
 - 主模型被拦截、换备用模型重试时，沿用已下载的参考图，不会重新下载。
+
+
+## 图片编辑
+
+编辑继续使用同一个 REST 接口或 MCP `generate_image` 工具，传原图 URL 和修改指令：
+
+```json
+{
+  "prompt": "把图1的白色背景换成窗边木桌与虚化绿植，保留杯子轮廓、把手和拍摄角度。",
+  "reference_images": ["https://images.example.com/original.jpg"],
+  "quality": "standard",
+  "aspect_ratio": "1:1",
+  "size": "1024x1024"
+}
+```
+
+示例 URL 需替换为可访问的原图 URL，也可使用本服务之前返回的完整 `image_url`。每轮编辑产生新 URL；下一轮把该 URL 放回 `reference_images`，服务不会隐式保留图片会话。保持原图形状时应显式传 `aspect_ratio`，默认 1:1 不会自动跟随原图。
+
+Seedream Flash / Pro 均可在 `prompt` 中使用 `<point>x y</point>` 或 `<bbox>x1 y1 x2 y2</bbox>` 定位编辑区域，坐标相对于整张参考图归一化到 0–999。例如：`只编辑图1 <bbox>400 420 610 620</bbox> 区域，在杯身添加金色星标，尽量保留其他部分。` 依赖该坐标协议时建议设置 `fallback_model="none"`，避免跨供应商备用对语法的解释不同。
+
+坐标定位不是像素遮罩，不保证区域外像素完全不变。当前工具没有开放本地文件上传、`mask` / `strength`、多图层返回或透明输出控制。实测与能力边界见[编辑调研](docs/SEEDREAM_EDITING_RESEARCH.md)。
+
+## 版本与 MCP 调用方更新
+
+发布记录见 [GitHub Releases](https://github.com/HyxiaoGe/image-service/releases)。服务版本同时出现在 MCP 初始化结果的 `serverInfo.version`、`GET /v1/health` 和 OpenAPI 的 `info.version`。
+
+GitHub Release 面向集成人员，不会自动刷新 MCP 调用方缓存的工具定义。升级服务后，调用方应重新执行 `initialize` 和 `tools/list`，替换旧的工具描述与参数 schema，再将新定义提供给模型；只重连但继续使用旧缓存也不会让模型获得新用法。当前服务为 stateless HTTP，跨部署的刷新不依赖长期会话通知。
 
 ## 自动找参考图（reference_subject）
 

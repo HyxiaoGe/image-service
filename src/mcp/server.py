@@ -6,6 +6,7 @@ from fastmcp.server.dependencies import get_http_request
 from fastmcp.tools import ToolResult
 from pydantic import ValidationError
 
+from src import __version__
 from src.config import SUPPORTED_MODELS, Settings
 from src.models.errors import ERROR_SPECS, ErrorCode, validation_error_fields
 from src.models.request import GenerateRequest, ImageQuality
@@ -14,7 +15,14 @@ from src.services.generator import GenerationError, handle_generate
 
 logger = structlog.get_logger()
 
-mcp = FastMCP("image-service")
+mcp = FastMCP(
+    "image-service",
+    version=__version__,
+    instructions="Use generate_image to create images or edit existing images with reference_images and edit "
+    "instructions. For another edit, pass the previous image_url as a reference. quality=standard selects "
+    "Seedream Flash; quality=high selects Pro; an explicit model takes priority. See the tool description "
+    "for Seedream coordinate editing and supported input limits.",
+)
 
 # These will be set during app startup
 _settings: Settings | None = None
@@ -69,12 +77,30 @@ async def generate_image(
     no_cache: bool = False,
     quality: ImageQuality | None = None,
 ) -> ToolResult:
-    """Generate an image from a text prompt via the image-service backend.
+    """Generate a new image or edit an existing image using reference_images.
+
+    To edit, pass the original image URL in reference_images and describe the
+    requested changes and what to preserve in prompt. For another editing round,
+    pass the previous result's image_url as the new reference; each call creates
+    a new image URL and does not overwrite the original. Preserve the input's
+    shape by explicitly setting aspect_ratio; it is not inferred from the image.
+
+    Seedream Flash and Pro also accept coordinate edits in prompt:
+    'In image 1 <bbox>400 420 610 620</bbox>, add a gold star; preserve the rest.'
+    Use <point>x y</point> for a point or <bbox>x1 y1 x2 y2</bbox> for a box,
+    with coordinates normalized to 0-999 relative to the whole reference image.
+    Select Seedream with quality or model; set fallback_model='none' when relying
+    on this provider-specific coordinate syntax. Edits are generative and do not
+    guarantee pixel-identical content outside the region. Local file uploads,
+    mask/strength controls, layer arrays and transparent-output controls are not
+    exposed by this tool.
 
     Args:
-        prompt: Text description of the image to generate.
+        prompt: Description for a new image, or editing instructions explaining
+            what to change and preserve in the supplied reference image(s).
         model: Image model ID (optional). Overrides quality when set. See list_models.
-        aspect_ratio: Aspect ratio e.g. '16:9', '1:1'. Default '1:1'.
+        aspect_ratio: Output aspect ratio e.g. '16:9', '1:1'. Default '1:1'.
+            For edits, set the original image's ratio to preserve its shape.
         size: Pixel budget as 'WxH'; aspect_ratio controls shape. Seedream fits
             this to its model's pixel limits. Gemini ignores size. Default
             '1024x1024'; use '1536x1536' for about 1.5K or '2048x2048' for about 2K.
@@ -92,7 +118,10 @@ async def generate_image(
             whether it applied).
         reference_images: Up to 3 public http(s) image URLs (PNG/JPEG/WebP, max
             4 MB each) for the model to follow, e.g. the real product's look or an
-            image to edit. Image URLs returned by this tool also work.
+            image to edit. Image URLs returned by this tool also work. For an
+            edit, put the base image first and identify any additional references
+            in prompt. To continue editing, pass the previous image_url here.
+            Accepts URLs only, not local paths or Base64 strings.
         reference_subject: The specific real-world object whose real look must be
             followed, e.g. a product model like 'iPhone 18 Pro'. The service then
             searches real photos of it and passes the best match to the model.

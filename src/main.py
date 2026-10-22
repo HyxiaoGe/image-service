@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import generate_latest
 
+from src import __version__
 from src.api.generate import validation_exception_handler
 from src.api.router import v1_router
 from src.config import Settings
@@ -73,7 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Image Service",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
 

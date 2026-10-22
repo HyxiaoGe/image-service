@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Request
 
+from src import __version__
 from src.models.response import HealthResponse
 
 router = APIRouter()
@@ -37,6 +38,6 @@ async def health(request: Request) -> HealthResponse:
 
     return HealthResponse(
         status=status,
-        version="0.1.0",
+        version=__version__,
         checks=checks,
     )
