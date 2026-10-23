@@ -40,7 +40,7 @@ image-service 复用 `seanfield-auth-client==0.3.1` 的 RS256/JWKS 验签 SDK，
 
 签发端负责校验来源应用和 Fusion 后端身份、继承用户、限制目标资源和权限，且换票不延长原用户授权。此处的新增 claims、用户委托换票和服务主体签发尚需 auth-service 实现；image-service 不签发 Token，不持有 auth-service 私钥，不宣称具备完整 OAuth/OIDC/MCP OAuth 自动发现能力。
 
-用户会话校验复用 `revoked_sid:{sid}` 和 `revoked_user:{sub}`。必须把 `AUTH_REDIS_URL` 指向 auth-service 使用的同一 Redis 数据库；为空时使用当前 `REDIS_URL`。与现有认证契约一致，Redis 撤销查询不可用时记录告警，短期退化为 JWT 自身有效期。`AUTH_GENERATION` 由签发端确认，资源端不根据请求参数修改它。
+用户会话校验复用 `revoked_sid:{sid}` 和 `revoked_user:{sub}`。必须把 `AUTH_REDIS_URL` 指向 auth-service 使用的同一 Redis 数据库；为空时使用当前 `REDIS_URL`。与现有认证契约一致，Redis 撤销查询不可用时记录告警，短期退化为 JWT 自身有效期。`auth_generation` 由签发端确认，资源端不根据请求参数修改它。
 
 读取/发现操作要求 `image:read`，生图要求 `image:generate`，管理用量要求 `usage:read`。MCP 在 HTTP 边界解析有界 JSON 请求并检查工具权限，鉴权拒绝使用 HTTP 401/403，发生在生图上游调用之前。HTTP 外的内存/stdio 调用在新认证模式下不允许绕过身份校验。
 
