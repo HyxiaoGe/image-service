@@ -65,6 +65,17 @@ shared `RequestLifetime` to request state. REST and MCP pass that lifetime into 
 same generation scope. This also cancels stateless MCP tools running in the SDK's
 separate lifespan task group. SDK cancellation notifications propagate normally.
 
+## Official billing (GET /v1/billing)
+
+Product-key authentication determines the configured Ark resource ID. `api/billing.py`
+calls `services/billing.py`, which signs read-only `ListSplitBillDetail` requests with
+the official SDK core and sends them through bounded asynchronous httpx. The query
+filters the Seedream product and API-key dimension, verifies every returned row,
+and publishes only a complete monthly CNY summary. Redis provides a 15-minute
+credential/product/resource/month cache and a global paced query lock. Missing
+billing credentials disable only this optional endpoint. This flow never invokes
+generation and does not change local usage estimates or MCP tools.
+
 ## Layer dependency rules
 
 - `api/` and `mcp/` may import from `services/`, `models/`, `middleware/`, `config`

@@ -61,8 +61,11 @@
 |---|---|
 | REST | `POST /v1/generate`、`GET /v1/models`、`GET /v1/health` |
 | MCP | `generate_image`、`list_models`（路径 `/mcp`） |
+| 费用查询 | `GET /v1/usage`（用量与标价估算）、`GET /v1/billing?bill_period=YYYY-MM`（官方月度分账） |
 
 产品身份、多方舟 Key、持久化用量和统一限流见[产品归因接入说明](docs/PRODUCT_ATTRIBUTION.md)。各产品用自己的服务密钥调用、由密钥决定产品和方舟 Key；默认且仅支持严格产品密钥认证，匿名和旧共享 Key 均被拒绝。
+
+官方账单查询还需配置有账单只读权限的火山引擎 `BILLING_ACCESS_KEY` / `BILLING_SECRET_KEY`、`BILLING_ENABLED=true`，并在各产品配置中填写 `ark_resource_id`。默认关闭；详见[官方分账查询](docs/PRODUCT_ATTRIBUTION.md#官方分账查询)。
 
 **出一张图**
 

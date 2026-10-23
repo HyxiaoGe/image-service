@@ -39,7 +39,7 @@ class CallerAuthMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         path = scope.get("path", "").rstrip("/")
-        if scope["type"] != "http" or path not in {"/mcp", "/v1/generate", "/v1/models", "/v1/usage"}:
+        if scope["type"] != "http" or path not in {"/mcp", "/v1/generate", "/v1/models", "/v1/usage", "/v1/billing"}:
             await self.app(scope, receive, send)
             return
         headers = Headers(scope=scope)

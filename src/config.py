@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 EndpointType = Literal["chat", "images", "dashscope"]
@@ -199,6 +199,11 @@ class Settings(BaseSettings):
     usage_enabled: bool = True
     usage_db_path: str | None = None
     usage_retention_days: int = Field(90, ge=90)
+    billing_enabled: bool = False
+    billing_access_key: SecretStr = SecretStr("")
+    billing_secret_key: SecretStr = SecretStr("")
+    billing_region: str = Field("cn-beijing", pattern=r"^[a-z0-9-]{1,40}$")
+    billing_product_code: str = Field("Doubao-Seedream", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     rate_limit_global: int = Field(20, ge=1)
     rate_limit_product: int = Field(20, ge=1)
     rate_limit_user: int = Field(5, ge=1)

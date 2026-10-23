@@ -22,7 +22,7 @@ X-Request-ID: <产品后端生成的调用关联 ID>
 
 默认且仅支持严格产品密钥认证。`AUTH_MODE` 可以省略或设为 `required`；`legacy` / `mixed` 配置会启动失败，避免旧配置意外开放调用。旧 `API_KEY`、`ALLOW_LEGACY_ANONYMOUS`、`LEGACY_APP_ID`、`RATE_LIMIT_PER_IP` 和共享 `ARK_API_KEY` 已移除，不再参与认证或凭证选择。部署前应删除这些过时配置，保留产品专用 Key。
 
-REST `/v1/generate`、`/v1/models`、`/v1/usage` 和整个 HTTP `/mcp` 端点均要求产品服务密钥，缺失、无效或误配到多个产品的相同密钥返回 401。`GET /v1/usage` 只能查该密钥所属产品。内存/stdio 生图和模型读取不提供匿名绕过。
+REST `/v1/generate`、`/v1/models`、`/v1/usage`、`/v1/billing` 和整个 HTTP `/mcp` 端点均要求产品服务密钥，缺失、无效或误配到多个产品的相同密钥返回 401。用量和官方账单只能查该密钥所属产品。内存/stdio 生图和模型读取不提供匿名绕过。
 
 `/v1/health`、`/metrics`、OpenAPI 和现有静态图片 URL 的公开行为保持原样；本次接入不提供图片访问权限隔离。鉴权拒绝发生在生图上游调用之前。
 
@@ -79,6 +79,59 @@ docker exec image-service python -m src.usage_report --app-id fusion --since 202
 官方实扣按专用 Key 资源 ID 的分账账单确认：[官方分账说明](https://docs.volcengine.com/docs/ark/practice-guidance-for-modelark-bill-split?lang=zh)。服务记录不包含优惠、赠额和账单调整，不伪装成官方实扣。
 
 dev 已统一采用产品服务密钥，旧调用方不再保留兼容。旧图片和过去不完整的日志不回填虚构产品身份。历史数据是否属于 Fusion，仍保持原来的证据边界。
+
+## 官方分账查询
+
+`/v1/usage` 继续提供调用记录与标价估算。新增 REST 管理接口单独读取火山引擎官方分账，查询不会生成图片，不增加 MCP 工具参数：
+
+```http
+GET /v1/billing?bill_period=2026-10
+Authorization: Bearer <该产品的服务密钥>
+```
+
+需在火山引擎开通按 API Key 分账，并将有账单只读权限的 IAM AK/SK 写入 image-service 宿主机 `.env` 后重建容器。这组凭证不同于方舟生图 API Key；不应提供给 Fusion、MCP 调用方或模型。已有产品配置必须填写对应 Key 的非秘密资源 ID `ark_resource_id=apikey-...`。
+
+```dotenv
+BILLING_ENABLED=true
+BILLING_ACCESS_KEY=<火山引擎账单只读AK>
+BILLING_SECRET_KEY=<火山引擎账单只读SK>
+BILLING_REGION=cn-beijing
+BILLING_PRODUCT_CODE=Doubao-Seedream
+```
+
+默认 `BILLING_ENABLED=false`。未启用、缺凭证或缺产品资源 ID 返回 503 `billing_not_configured`，不影响生图。AK/SK 使用 SecretStr 遮蔽配置表示，服务不记录签名、凭证或原始账单，只缓存白名单汇总。
+
+调用官方 `ListSplitBillDetail`，使用 `Product=["Doubao-Seedream"]`、`SplitDimension="{\"Doubao-Seedream\":\"apikey_id\"}"` 和本产品 `SplitItemID`。2026-10-23 在官方 API Explorer 实测，该组合能读取 Fusion Key 的 0.12 元应付与实付；通用示例的 `ark_bd` 并非 Seedream 图片产品代码。调用方不能传资源 ID 或产品 ID 来查询其他产品；返回行也逐条核验产品代码、资源、账期及人民币币种。
+
+返回示例中的金额是十进制字符串：
+
+```json
+{
+  "app_id": "fusion",
+  "ark_resource_id": "apikey-...",
+  "bill_period": "2026-10",
+  "cost_kind": "official_split_bill",
+  "scope": "ark_api_key",
+  "product_code": "Doubao-Seedream",
+  "currency": "CNY",
+  "status": "available",
+  "record_count": 1,
+  "payable_amount_cny": "0.12",
+  "paid_amount_cny": "0.12",
+  "expected_delay_days": 2,
+  "settlement_finality": "not_asserted",
+  "queried_at": "2026-10-23T12:18:35+00:00",
+  "cached": false
+}
+```
+
+`PayableAmount` / `PaidAmount` 分别为官方应付 / 实付，不推断最终结算。按 Key 汇总该账期全部 Seedream 图片费用，不能拆到用户、场景或单次 run；也不包括 Gemini/Qwen 等其他供应商费用。用户和场景仍看本地用量估算。同一个方舟 Key 若被其他系统共用，其图片费用也会进入该汇总；应保持产品专用。
+
+账期支持当前月及过去 24 个月。官方说明分账相对明细约有 2 天延迟；当前月金额可能继续变化。没有返回行时，`status=no_data`，金额为 `null`，不把空账单解释为零费用。已清理的本地记录不会影响官方月度查询。
+
+服务缓存每个凭证账号、产品、资源和账期的汇总 15 分钟，响应禁止浏览器共享缓存；`queried_at` 为官方查询时间，`cached` 标明是否复用。查询最多 10 秒、每页 100 行、最多 10 页，页间至少 250ms，所有产品和实例共用 Redis 查询锁。繁忙返回 503 `billing_busy` 和 `Retry-After: 1`；官方权限拒绝为 502 `billing_permission_denied`；分页不完整、警告或数据范围不符为 502 `billing_incomplete`；网络、总时限或 Redis 故障为 503 `billing_unavailable`。不返回部分金额，不自动重试或跟随上游重定向。
+
+接口依据：[官方分账 API](https://api.volcengine.com/api-docs/view?action=ListSplitBillDetail&serviceCode=billing&version=2022-01-01)、[账单 OpenAPI 常见问题](https://docs.volcengine.com/docs/BillingCenter/BillingManagementOpenAPIFAQ?lang=zh)。
 
 ## REST / MCP 统一限流与并发
 
