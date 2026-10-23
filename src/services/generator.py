@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import math
+import os
 import re
 import time
 import uuid
@@ -18,6 +19,7 @@ import structlog
 
 from src.config import SUPPORTED_MODELS, Settings
 from src.models.errors import ERROR_SPECS, ErrorCode
+from src.models.identity import CallerIdentity
 from src.models.lifetime import RequestLifetime
 from src.models.request import MAX_REFERENCE_IMAGES, GenerateRequest
 from src.models.response import GenerateResponse, ReferenceSearchInfo
@@ -31,7 +33,18 @@ from src.services.metrics import (
     REQUEST_COUNT,
 )
 from src.services.reference_search import GENERATION_TTL, SearchOutcome, find_references
-from src.services.references import ReferenceImage, ReferenceImageError, _sniff_mime, load_reference_images
+from src.services.references import ReferenceImage, ReferenceImageError, _sniff_mime, image_size, load_reference_images
+from src.services.usage import UsageStore, ark_estimate, usage_store
+
+
+@dataclass
+class UsageRun:
+    request_id: str
+    store: UsageStore | None
+
+
+_caller_identity: ContextVar[CallerIdentity | None] = ContextVar("caller_identity", default=None)
+_usage_run: ContextVar[UsageRun | None] = ContextVar("usage_run", default=None)
 
 logger = structlog.get_logger()
 
@@ -201,9 +214,51 @@ async def _post_with_retries(
             raise GenerationError(ErrorCode.UPSTREAM_TIMEOUT, timeout_fallback_allowed=True)
         remaining = min(timeout_seconds, max(0.001, state.deadline - time.monotonic())) if state else timeout_seconds
         timeout = httpx.Timeout(remaining, connect=min(5, remaining), pool=min(5, remaining))
+        run = _usage_run.get()
+        attempt_id = None
+        if run and run.store:
+            alias = (
+                _log_fields.get({}).get("credential_alias", "legacy-ark") if provider == "ark" else f"shared-{provider}"
+            )
+            try:
+                attempt_id = await run.store.start_attempt(
+                    run.request_id,
+                    {
+                        "model": model,
+                        "provider": provider,
+                        "credential_alias": alias,
+                        "credential_resource_id": _log_fields.get({}).get("credential_resource_id")
+                        if provider == "ark"
+                        else None,
+                    },
+                )
+            except Exception:
+                raise GenerationError(ErrorCode.USAGE_UNAVAILABLE) from None
+        attempt_started = time.monotonic()
+
+        async def record_attempt(
+            outcome: str, *, run=run, attempt_id=attempt_id, attempt_started=attempt_started, **extra
+        ) -> None:
+            if run and run.store and attempt_id:
+                try:
+                    with anyio.move_on_after(0.5, shield=True):
+                        await run.store.finish_attempt(
+                            attempt_id,
+                            {
+                                "outcome": outcome,
+                                "duration_ms": int((time.monotonic() - attempt_started) * 1000),
+                                **extra,
+                            },
+                        )
+                except Exception:
+                    # 已有持久化的 submitted 行，保留为待对账，不因记账更新失败重发生图。
+                    logger.error("usage_attempt_update_failed", request_id=run.request_id, attempt_id=attempt_id)
+
         _upstream_attempts.set(_upstream_attempts.get() + 1)
         logger.info("upstream_request", provider=provider, model=model, attempt=attempt)
         try:
+            if budget is not None:
+                await budget.checkpoint()
             if state is not None:
                 state.submitted = True
             if http_client is not None:
@@ -213,12 +268,35 @@ async def _post_with_retries(
                     resp = await client.post(url, headers=headers, json=payload)
             if state is not None:
                 state.response_received = resp.status_code == 200
+            details = {
+                "http_status": resp.status_code,
+                "upstream_request_id": resp.headers.get("x-tt-logid") or resp.headers.get("x-request-id"),
+            }
+            if provider == "ark" and resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        details.update(ark_estimate(payload, data))
+                        usage = data.get("usage")
+                        if isinstance(usage, dict):
+                            details.update(
+                                {
+                                    k: v
+                                    for k, v in usage.items()
+                                    if k in {"input_images", "generated_images", "output_tokens", "total_tokens"}
+                                    and type(v) is int
+                                }
+                            )
+                except ValueError:
+                    pass
+            await record_attempt("response", **details)
             break  # Success, exit retry loop
         except httpx.TimeoutException as e:
             logger.warning("upstream_timeout", provider=provider, model=model, attempt=attempt)
             safe_to_retry = isinstance(e, (httpx.ConnectTimeout, httpx.PoolTimeout))
             if safe_to_retry and state is not None:
                 state.submitted = False
+            await record_attempt("not_submitted" if safe_to_retry else "timeout")
             if safe_to_retry and attempt < MAX_RETRIES + 1:
                 await asyncio.sleep(2)
                 continue
@@ -231,6 +309,7 @@ async def _post_with_retries(
         except httpx.ConnectError:
             if state is not None:
                 state.submitted = False
+            await record_attempt("not_submitted")
             logger.warning("upstream_connect_error", provider=provider, model=model, attempt=attempt)
             if attempt < MAX_RETRIES + 1:
                 await asyncio.sleep(2)
@@ -240,6 +319,7 @@ async def _post_with_retries(
                 upstream_detail=f"cannot connect to {provider} after {MAX_RETRIES + 1} attempts",
             ) from None
         except httpx.TransportError as e:
+            await record_attempt("transport_error")
             # e.g. connection dropped mid-response: not retried, the upstream may
             # already be generating (and billing) this request.
             raise GenerationError(
@@ -247,6 +327,9 @@ async def _post_with_retries(
                 upstream_detail=f"{provider} transport error: {type(e).__name__}",
                 maybe_billed=True,
             ) from None
+        except asyncio.CancelledError:
+            await record_attempt("cancelled" if state is None or state.submitted else "not_submitted")
+            raise
     assert resp is not None  # loop always breaks with resp set or raises
     return resp
 
@@ -443,8 +526,18 @@ async def call_seedream_images(
     reference_images: list[ReferenceImage] | None = None,
 ) -> tuple[bytes, str]:
     """Call Volcengine Ark for Seedream; return image bytes and detected format."""
-    if not settings.ark_api_key:
+    caller = _caller_identity.get()
+    ark_key = settings.ark_api_key
+    alias, resource_id = "legacy-ark", None
+    if caller is not None and caller.auth_method != "legacy":
+        product = settings.products.get(caller.app_id)
+        if product is None:
+            raise GenerationError(ErrorCode.CONFIG_MISSING)
+        ark_key = os.environ.get(product.ark_key_env, "").strip()
+        alias, resource_id = product.ark_key_alias, product.ark_resource_id
+    if not ark_key:
         raise GenerationError(ErrorCode.CONFIG_MISSING, upstream_detail="ARK_API_KEY is not configured")
+    _log_fields.get({}).update(credential_alias=alias, credential_resource_id=resource_id)
 
     content = prompt
     if style:
@@ -467,7 +560,7 @@ async def call_seedream_images(
     url = f"{settings.ark_base_url}/images/generations"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {settings.ark_api_key}",
+        "Authorization": f"Bearer {ark_key}",
     }
 
     _log_fields.get({}).update(ark_model=payload["model"], ark_size=payload["size"])
@@ -639,6 +732,7 @@ def save_image(image_bytes: bytes, gen_id: str, fmt: str, storage_dir: str) -> s
 
 
 def _cached_response(cached: dict, requested_model: str) -> GenerateResponse:
+    _log_fields.get({}).update(artifact_app_id=cached.get("app_id"), artifact_subject=cached.get("subject"))
     return GenerateResponse(
         id=cached["id"],
         image_url=cached["image_url"],
@@ -660,6 +754,83 @@ async def handle_generate(
     http_client: httpx.AsyncClient | None = None,
     entry: str = "rest",
     lifetime: RequestLifetime | None = None,
+    caller: CallerIdentity | None = None,
+) -> GenerateResponse:
+    """设置独立身份上下文；落盘记账失败时不提交新的上游请求。"""
+    if caller is None:
+        if settings.auth_mode != "legacy":
+            raise GenerationError(ErrorCode.CONFIG_MISSING, "Authenticated HTTP caller is required.")
+        caller = CallerIdentity.legacy(settings.legacy_app_id)
+    started = lifetime.started_at if lifetime else time.monotonic()
+    path = settings.usage_db_path or str(Path(settings.storage_dir).parent / "usage.sqlite3")
+    store = usage_store(path, settings.usage_retention_days) if settings.usage_enabled else None
+    if store and lifetime is None:
+        lifetime = RequestLifetime(started_at=started)
+    run = UsageRun(str(uuid.uuid4()), store)
+    identity_token = _caller_identity.set(caller)
+    usage_token = _usage_run.set(run)
+    fields_token = _log_fields.set({})
+    outcome, result, error_code = "error", None, None
+    try:
+        if store:
+            try:
+                await store.begin(
+                    {
+                        "request_id": run.request_id,
+                        "app_id": caller.app_id,
+                        "subject": caller.subject,
+                        "principal_type": caller.principal_type,
+                        "authorized_party": caller.authorized_party,
+                        "auth_method": caller.auth_method,
+                        "scene": caller.scene,
+                        "correlation_id": caller.correlation_id,
+                        "entry": entry,
+                        "requested_model": request.model or QUALITY_MODELS.get(request.quality, settings.default_model),
+                    }
+                )
+            except Exception:
+                raise GenerationError(ErrorCode.USAGE_UNAVAILABLE) from None
+        result = await _handle_generate(request, settings, cache, http_client, entry, lifetime)
+        outcome = "cached" if result.cached else "success"
+        return result
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    except GenerationError as exc:
+        error_code = exc.code.value
+        raise
+    except Exception:
+        error_code = ErrorCode.INTERNAL_ERROR.value
+        raise
+    finally:
+        if store:
+            record = {
+                **_log_fields.get({}),
+                "outcome": outcome,
+                "error_code": error_code,
+                "generation_id": result.id if result else _log_fields.get({}).get("generation_id"),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            }
+            if result:
+                record["model"] = result.model
+            try:
+                remaining = max(0, settings.generation_timeout_seconds - (time.monotonic() - started))
+                with anyio.move_on_after(min(0.5, remaining), shield=True):
+                    await store.finish(run.request_id, record)
+            except Exception:
+                logger.error("usage_request_update_failed", request_id=run.request_id)
+        _log_fields.reset(fields_token)
+        _usage_run.reset(usage_token)
+        _caller_identity.reset(identity_token)
+
+
+async def _handle_generate(
+    request: GenerateRequest,
+    settings: Settings,
+    cache: CacheService,
+    http_client: httpx.AsyncClient | None,
+    entry: str,
+    lifetime: RequestLifetime | None,
 ) -> GenerateResponse:
     """Generate (or fetch from cache) and emit one ``generation_finished`` summary log."""
     started = lifetime.started_at if lifetime is not None else time.monotonic()
@@ -672,7 +843,7 @@ async def handle_generate(
     else:
         requested_model, model_source = settings.default_model, "default"
     fields: dict[str, object] = {
-        "request_id": str(uuid.uuid4()),
+        "request_id": _usage_run.get().request_id,
         "entry": entry,
         "requested_model": requested_model,
         "quality": request.quality,
@@ -690,6 +861,16 @@ async def handle_generate(
         "fallback_model": request.fallback_model,
         "fallback_source": None,
     }
+    caller = _caller_identity.get()
+    fields.update(
+        app_id=caller.app_id,
+        subject=caller.subject,
+        principal_type=caller.principal_type,
+        authorized_party=caller.authorized_party,
+        auth_method=caller.auth_method,
+        scene=caller.scene,
+        correlation_id=caller.correlation_id,
+    )
     _log_fields.set(fields)
 
     def finish(level: str, **extra: object) -> None:
@@ -1076,6 +1257,11 @@ async def _generate(
         request.grounding,
         request.reference_images,
         request.reference_subject,
+        namespace=(
+            _caller_identity.get().app_id
+            if _caller_identity.get() and _caller_identity.get().auth_method != "legacy"
+            else None
+        ),
     )
 
     lock_token: str | None = None
@@ -1132,6 +1318,11 @@ async def _generate(
         grounding_used = _grounding_applies(request, actual_model)
         gen_id = str(uuid.uuid4())
         filename = save_image(image_bytes, gen_id, fmt, settings.storage_dir)
+        caller = _caller_identity.get()
+        _log_fields.get().update(generation_id=gen_id, artifact_app_id=caller.app_id, artifact_subject=caller.subject)
+        dimensions = image_size(image_bytes)
+        if dimensions:
+            _log_fields.get()["output_size"] = f"{dimensions[0]}x{dimensions[1]}"
 
         image_url = f"{settings.static_url_prefix}/{filename}"
         created_at = datetime.now(UTC).isoformat()
@@ -1144,6 +1335,8 @@ async def _generate(
             "created_at": created_at,
             "reference_images_used": reference_urls,
             "reference_search": reference_search.model_dump() if reference_search else None,
+            "app_id": caller.app_id,
+            "subject": caller.subject,
         }
         await cache.set_cached(cache_key, metadata, ttl=GENERATION_TTL.get(outcome.status) if outcome else None)
 

@@ -62,6 +62,8 @@
 | REST | `POST /v1/generate`、`GET /v1/models`、`GET /v1/health` |
 | MCP | `generate_image`、`list_models`（路径 `/mcp`） |
 
+产品身份、多方舟 Key、持久化用量和兼容迁移见[产品归因接入说明](docs/PRODUCT_ATTRIBUTION.md)。默认 `AUTH_MODE=legacy` 保持既有调用行为；新认证与正式分账需与 auth-service、Fusion 联调后启用。
+
 **出一张图**
 
 ```bash

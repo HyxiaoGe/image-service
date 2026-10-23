@@ -92,6 +92,7 @@ def settings(tmp_storage: Path) -> Settings:
         rate_limit_per_ip=5,
         rate_limit_window=60,
         cache_ttl_seconds=3600,
+        usage_enabled=False,  # 计费记录在专门的集成测试中启用，故障预算用例不引入磁盘时序。
     )
 
 

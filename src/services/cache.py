@@ -31,6 +31,8 @@ def compute_cache_key(
     grounding: bool = False,
     reference_images: list[str] | None = None,
     reference_subject: str | None = None,
+    *,
+    namespace: str | None = None,
 ) -> str:
     """Compute SHA-256 cache key from normalized generation parameters.
 
@@ -40,6 +42,8 @@ def compute_cache_key(
     """
     style_part = (style or "").strip().lower()
     raw = f"{CACHE_KEY_VERSION}:{prompt.strip().lower()}:{model.lower()}:{aspect_ratio}:{size}:{style_part}"
+    if namespace is not None:
+        raw = f"app={namespace}:" + raw
     if fallback_model:
         raw += f":fallback={fallback_model.lower()}"
     # Seedream now uses each model's pixel budget and preserves extreme ratios.

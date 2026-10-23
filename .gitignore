@@ -1,5 +1,6 @@
 .env
 storage/images/*
+storage/*.sqlite3*
 !storage/images/.gitkeep
 __pycache__/
 *.pyc

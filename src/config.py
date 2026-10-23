@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 EndpointType = Literal["chat", "images", "dashscope"]
@@ -162,6 +163,15 @@ SUPPORTED_MODELS: dict[str, ModelInfo] = {
 }
 
 
+class ProductConfig(BaseModel):
+    """凭证仅引用服务端环境变量；别名可安全用于日志和分账。"""
+
+    authorized_parties: list[str] = Field(min_length=1)
+    ark_key_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,127}$")
+    ark_key_alias: str = Field(pattern=r"^[a-zA-Z0-9_.-]{1,80}$")
+    ark_resource_id: str | None = Field(None, max_length=128)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -184,6 +194,18 @@ class Settings(BaseSettings):
     port: int = 8090
     service_base_url: str = "http://localhost:8090"
     api_key: str | None = None
+    auth_mode: Literal["legacy", "mixed", "required"] = "legacy"
+    auth_issuer: str = ""
+    auth_jwks_url: str = ""
+    auth_audience: str = Field("image-service", min_length=1)
+    auth_leeway_seconds: float = Field(5, ge=0, le=60, allow_inf_nan=False)
+    auth_redis_url: str | None = None
+    legacy_app_id: str = Field("legacy", pattern=r"^[a-zA-Z0-9_.-]{1,64}$")
+    allow_legacy_anonymous: bool = False
+    products: dict[str, ProductConfig] = Field(default_factory=dict)
+    usage_enabled: bool = True
+    usage_db_path: str | None = None
+    usage_retention_days: int = Field(90, ge=90)
     rate_limit_global: int = 20
     rate_limit_per_ip: int = 5
     rate_limit_window: int = 60
@@ -234,6 +256,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_default_models(self) -> Settings:
+        if self.auth_mode != "legacy" and not (self.auth_issuer and self.auth_jwks_url):
+            raise ValueError("AUTH_ISSUER and AUTH_JWKS_URL are required for JWT authentication")
+        for app_id in self.products:
+            if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", app_id):
+                raise ValueError("PRODUCTS contains an invalid application identifier")
         # Fail at startup (the deploy health check catches it) rather than on
         # every request after a typo in .env.
         if self.default_model not in SUPPORTED_MODELS:

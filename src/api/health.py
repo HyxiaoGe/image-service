@@ -7,6 +7,7 @@ from fastapi import APIRouter, Request
 
 from src import __version__
 from src.models.response import HealthResponse
+from src.services.usage import usage_store
 
 router = APIRouter()
 
@@ -31,6 +32,15 @@ async def health(request: Request) -> HealthResponse:
         checks["storage"] = "ok"
     else:
         checks["storage"] = "error: storage directory not writable"
+
+    if settings.usage_enabled:
+        path = settings.usage_db_path or str(storage_path.parent / "usage.sqlite3")
+        try:
+            checks["usage"] = (
+                "ok" if await usage_store(path, settings.usage_retention_days).ping() else "error: unavailable"
+            )
+        except Exception:
+            checks["usage"] = "error: accounting storage unavailable"
 
     # Determine overall status
     all_ok = all(v == "ok" for v in checks.values())

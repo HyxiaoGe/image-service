@@ -171,9 +171,12 @@ async def generate_image(
 
     try:
         try:
-            lifetime = getattr(get_http_request().state, "image_generation", None)
+            state = get_http_request().state
+            lifetime = getattr(state, "image_generation", None)
+            caller = getattr(state, "image_caller", None)
         except RuntimeError:  # In-memory / stdio MCP has no HTTP request.
             lifetime = None
+            caller = None
         result = await handle_generate(
             request,
             _settings,
@@ -181,6 +184,7 @@ async def generate_image(
             http_client=_http_client,
             entry="mcp",
             lifetime=lifetime,
+            caller=caller,
         )
     except GenerationError as e:
         return _error_result(e.code, e.message, model=e.model, fields=e.fields, fallback_from=e.fallback_from)

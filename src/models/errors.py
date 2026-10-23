@@ -17,6 +17,7 @@ class ErrorCode(StrEnum):
     CONFIG_MISSING = "config_missing"
     GENERATION_IN_PROGRESS = "generation_in_progress"
     INTERNAL_ERROR = "internal_error"
+    USAGE_UNAVAILABLE = "usage_unavailable"
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ ERROR_SPECS: dict[ErrorCode, ErrorSpec] = {
         503, True, "An identical request is still being generated. Please retry shortly."
     ),
     ErrorCode.INTERNAL_ERROR: ErrorSpec(500, False, "Internal error while generating the image."),
+    ErrorCode.USAGE_UNAVAILABLE: ErrorSpec(503, False, "Generation accounting is temporarily unavailable."),
 }
 
 
