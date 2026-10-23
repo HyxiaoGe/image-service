@@ -23,6 +23,7 @@ from src.models.identity import CallerIdentity
 from src.models.lifetime import RequestLifetime
 from src.models.request import MAX_REFERENCE_IMAGES, GenerateRequest
 from src.models.response import GenerateResponse, ReferenceSearchInfo
+from src.services.admission import AdmissionError, generation_admission
 from src.services.budget import CLEANUP_TIMEOUT_SECONDS, current_budget, generation_scope
 from src.services.cache import CacheService, compute_cache_key
 from src.services.metrics import (
@@ -75,6 +76,7 @@ class GenerationError(Exception):
         fallback_from: dict[str, str] | None = None,
         maybe_billed: bool = False,
         timeout_fallback_allowed: bool = False,
+        retry_after: int | None = None,
     ):
         spec = ERROR_SPECS[code]
         self.code = code
@@ -85,6 +87,7 @@ class GenerationError(Exception):
         self.upstream_status = upstream_status
         self.upstream_detail = upstream_detail[:500] if upstream_detail else None
         self.fields = fields
+        self.retry_after = retry_after
         self.fallback_from = fallback_from  # set when every fallback model also failed
         # The upstream may already have produced (and billed) an image, e.g. the
         # connection dropped mid-response. Only generation timeouts explicitly
@@ -217,9 +220,7 @@ async def _post_with_retries(
         run = _usage_run.get()
         attempt_id = None
         if run and run.store:
-            alias = (
-                _log_fields.get({}).get("credential_alias", "legacy-ark") if provider == "ark" else f"shared-{provider}"
-            )
+            alias = _log_fields.get({}).get("credential_alias") if provider == "ark" else f"shared-{provider}"
             try:
                 attempt_id = await run.store.start_attempt(
                     run.request_id,
@@ -527,16 +528,13 @@ async def call_seedream_images(
 ) -> tuple[bytes, str]:
     """Call Volcengine Ark for Seedream; return image bytes and detected format."""
     caller = _caller_identity.get()
-    ark_key = settings.ark_api_key
-    alias, resource_id = "legacy-ark", None
-    if caller is not None and caller.auth_method != "legacy":
-        product = settings.products.get(caller.app_id)
-        if product is None:
-            raise GenerationError(ErrorCode.CONFIG_MISSING)
-        ark_key = os.environ.get(product.ark_key_env, "").strip()
-        alias, resource_id = product.ark_key_alias, product.ark_resource_id
+    product = settings.products.get(caller.app_id) if caller is not None else None
+    if product is None:
+        raise GenerationError(ErrorCode.CONFIG_MISSING)
+    ark_key = os.environ.get(product.ark_key_env, "").strip()
+    alias, resource_id = product.ark_key_alias, product.ark_resource_id
     if not ark_key:
-        raise GenerationError(ErrorCode.CONFIG_MISSING, upstream_detail="ARK_API_KEY is not configured")
+        raise GenerationError(ErrorCode.CONFIG_MISSING, upstream_detail="Product Ark key is not configured")
     _log_fields.get({}).update(credential_alias=alias, credential_resource_id=resource_id)
 
     content = prompt
@@ -757,10 +755,8 @@ async def handle_generate(
     caller: CallerIdentity | None = None,
 ) -> GenerateResponse:
     """设置独立身份上下文；落盘记账失败时不提交新的上游请求。"""
-    if caller is None:
-        if settings.auth_mode != "legacy":
-            raise GenerationError(ErrorCode.CONFIG_MISSING, "Authenticated HTTP caller is required.")
-        caller = CallerIdentity.legacy(settings.legacy_app_id)
+    if caller is None or caller.auth_method != "service_key" or caller.app_id not in settings.products:
+        raise GenerationError(ErrorCode.UNAUTHORIZED)
     started = lifetime.started_at if lifetime else time.monotonic()
     path = settings.usage_db_path or str(Path(settings.storage_dir).parent / "usage.sqlite3")
     store = usage_store(path, settings.usage_retention_days) if settings.usage_enabled else None
@@ -885,7 +881,13 @@ async def _handle_generate(
     try:
         try:
             async with generation_scope(settings, lifetime):
-                result = await _generate(request, requested_model, settings, cache, http_client)
+                _validate(request, requested_model)
+                fields["stage"] = "admission"
+                try:
+                    async with generation_admission(cache.redis, settings, caller):
+                        result = await _generate(request, requested_model, settings, cache, http_client)
+                except AdmissionError as exc:
+                    raise GenerationError(exc.code, retry_after=exc.retry_after) from None
         except TimeoutError:
             REQUEST_COUNT.labels(model=fields.get("active_model") or requested_model, status="error").inc()
             raise GenerationError(
@@ -1257,11 +1259,7 @@ async def _generate(
         request.grounding,
         request.reference_images,
         request.reference_subject,
-        namespace=(
-            _caller_identity.get().app_id
-            if _caller_identity.get() and _caller_identity.get().auth_method != "legacy"
-            else None
-        ),
+        namespace=_caller_identity.get().app_id,
     )
 
     lock_token: str | None = None
@@ -1359,7 +1357,11 @@ async def _generate(
     finally:
         if lock_token is not None:
             budget = current_budget()
-            cleanup = budget.cleanup_timeout if budget is not None else CLEANUP_TIMEOUT_SECONDS
+            cleanup = (
+                min(budget.cleanup_timeout, budget.cleanup_remaining())
+                if budget is not None
+                else CLEANUP_TIMEOUT_SECONDS
+            )
             try:
                 with anyio.move_on_after(cleanup, shield=True) as cleanup_scope:
                     await cache.release_lock(cache_key, lock_token)

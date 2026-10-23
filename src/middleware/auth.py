@@ -4,14 +4,12 @@ import os
 import re
 import secrets
 
-from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from src.config import Settings
 from src.models.identity import CallerIdentity
-from src.models.response import ErrorResponse
 
 _USER_PATTERN = re.compile(r"[a-zA-Z0-9_.:@-]{1,128}")
 _CORRELATION_PATTERN = re.compile(r"[a-zA-Z0-9_.:-]{1,128}")
@@ -24,12 +22,13 @@ def _same_bearer(header: str, key: str) -> bool:
 
 def match_product(settings: Settings, bearer: str) -> str | None:
     """按服务密钥认出调用产品；逐个常量时间比较，未配置密钥的产品不可被匹配。"""
-    matched = None
+    matches = []
     for app_id, product in settings.products.items():
         key = os.environ.get(product.service_key_env, "").strip()
         if key and _same_bearer(bearer, key):
-            matched = app_id
-    return matched
+            matches.append(app_id)
+    # 相同密钥误配到多个产品时拒绝，不能依据配置顺序选择产品。
+    return matches[0] if len(matches) == 1 else None
 
 
 class CallerAuthMiddleware:
@@ -60,16 +59,6 @@ class CallerAuthMiddleware:
             if user is not None and not _USER_PATTERN.fullmatch(user):
                 user = None
             caller = CallerIdentity.product(app_id, user, **metadata)
-        elif path == "/v1/usage":
-            pass
-        elif s.auth_mode == "legacy":
-            # 保持默认版本的 REST 静态 Key / MCP 无鉴权行为。
-            if not (path == "/v1/generate" and s.api_key and not _same_bearer(bearer, s.api_key)):
-                caller = CallerIdentity.legacy(s.legacy_app_id, **metadata)
-        elif s.auth_mode == "mixed" and (
-            (s.api_key and _same_bearer(bearer, s.api_key)) or (not bearer and s.allow_legacy_anonymous)
-        ):
-            caller = CallerIdentity.legacy(s.legacy_app_id, **metadata)
         if caller is None:
             response = JSONResponse(
                 {"error": "unauthorized", "message": "Request identity could not be accepted."},
@@ -80,34 +69,3 @@ class CallerAuthMiddleware:
             return
         scope.setdefault("state", {})["image_caller"] = caller
         await self.app(scope, receive, send)
-
-
-def check_api_key(request: Request) -> JSONResponse | None:
-    """Check Bearer token if API_KEY is configured. Returns None if OK."""
-    if getattr(request.state, "image_caller", None) is not None:
-        return None  # HTTP 边界已经完成认证。
-    settings = request.app.state.settings
-    if not settings.api_key:
-        return None  # No auth configured, allow all
-
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return JSONResponse(
-            status_code=401,
-            content=ErrorResponse(
-                error="unauthorized",
-                message="Missing or invalid Authorization header. Use: Bearer <API_KEY>",
-            ).model_dump(),
-        )
-
-    token = auth_header[7:]  # Strip "Bearer "
-    if token != settings.api_key:
-        return JSONResponse(
-            status_code=401,
-            content=ErrorResponse(
-                error="unauthorized",
-                message="Invalid API key.",
-            ).model_dump(),
-        )
-
-    return None

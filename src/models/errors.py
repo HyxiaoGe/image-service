@@ -18,6 +18,9 @@ class ErrorCode(StrEnum):
     GENERATION_IN_PROGRESS = "generation_in_progress"
     INTERNAL_ERROR = "internal_error"
     USAGE_UNAVAILABLE = "usage_unavailable"
+    UNAUTHORIZED = "unauthorized"
+    RATE_LIMITED = "rate_limited"
+    ADMISSION_UNAVAILABLE = "admission_unavailable"
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,9 @@ class ErrorSpec:
 
 
 ERROR_SPECS: dict[ErrorCode, ErrorSpec] = {
+    ErrorCode.UNAUTHORIZED: ErrorSpec(401, False, "A product service key is required."),
+    ErrorCode.RATE_LIMITED: ErrorSpec(429, True, "Generation rate or concurrency limit exceeded."),
+    ErrorCode.ADMISSION_UNAVAILABLE: ErrorSpec(503, True, "Generation admission control is temporarily unavailable."),
     ErrorCode.INVALID_PARAMS: ErrorSpec(422, False, "Request parameters are invalid."),
     ErrorCode.MODEL_NOT_FOUND: ErrorSpec(400, False, "Model not found. Use GET /v1/models for available models."),
     ErrorCode.CONTENT_FILTERED: ErrorSpec(

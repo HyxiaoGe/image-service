@@ -5,8 +5,6 @@ from fastapi import APIRouter, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from src.middleware.auth import check_api_key
-from src.middleware.rate_limit import check_rate_limit
 from src.models.errors import ERROR_SPECS, ErrorCode, validation_error_fields
 from src.models.request import GenerateRequest
 from src.models.response import ErrorResponse, GenerateResponse
@@ -24,6 +22,7 @@ def error_response(
     model: str | None = None,
     fields: list[str] | None = None,
     fallback_from: dict[str, str] | None = None,
+    retry_after: int | None = None,
 ) -> JSONResponse:
     spec = ERROR_SPECS[code]
     return JSONResponse(
@@ -35,7 +34,9 @@ def error_response(
             model=model,
             fields=fields,
             fallback_from=fallback_from,
+            retry_after=retry_after,
         ).model_dump(exclude_none=True),
+        headers={"Retry-After": str(retry_after)} if retry_after is not None else None,
     )
 
 
@@ -61,16 +62,6 @@ async def validation_exception_handler(_request: Request, exc: RequestValidation
     },
 )
 async def generate(body: GenerateRequest, request: Request) -> GenerateResponse | JSONResponse:
-    # API key check
-    auth_response = check_api_key(request)
-    if auth_response is not None:
-        return auth_response
-
-    # Rate limiting
-    rate_limit_response = await check_rate_limit(request)
-    if rate_limit_response is not None:
-        return rate_limit_response
-
     settings = request.app.state.settings
     cache = request.app.state.cache
 
@@ -86,7 +77,9 @@ async def generate(body: GenerateRequest, request: Request) -> GenerateResponse 
             caller=getattr(request.state, "image_caller", None),
         )
     except GenerationError as e:
-        return error_response(e.code, e.message, model=e.model, fields=e.fields, fallback_from=e.fallback_from)
+        return error_response(
+            e.code, e.message, model=e.model, fields=e.fields, fallback_from=e.fallback_from, retry_after=e.retry_after
+        )
     except Exception:
         # handle_generate already logged the traceback; never leak it to the caller.
         return error_response(ErrorCode.INTERNAL_ERROR)

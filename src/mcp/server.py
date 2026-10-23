@@ -44,6 +44,7 @@ def _error_result(
     model: str | None = None,
     fields: list[str] | None = None,
     fallback_from: dict[str, str] | None = None,
+    retry_after: int | None = None,
 ) -> ToolResult:
     """Failure result: text keeps the ``Error`` prefix callers already match on,
     structured content carries the code. ``isError`` stays false so existing MCP
@@ -57,6 +58,8 @@ def _error_result(
         error["fields"] = fields
     if fallback_from:
         error["fallback_from"] = fallback_from
+    if retry_after is not None:
+        error["retry_after"] = retry_after
     return ToolResult(
         content=f"Error generating image [{code.value}]: {message}",
         structured_content={"ok": False, "error": error},
@@ -146,6 +149,9 @@ async def generate_image(
     including reference lookup, cache waits and all model attempts. Cancellation
     or HTTP disconnect stops local work and further attempts; it cannot guarantee
     that a provider stops or refunds an already-submitted generation.
+    REST and MCP share per-product/user request and concurrency limits, including
+    cache hits. On rate_limited, wait error.retry_after seconds before retrying;
+    do not repeatedly switch entry points or retry without a bound.
     """
     if _settings is None or _cache is None:
         return _error_result(ErrorCode.CONFIG_MISSING, "MCP server not initialized")
@@ -187,7 +193,9 @@ async def generate_image(
             caller=caller,
         )
     except GenerationError as e:
-        return _error_result(e.code, e.message, model=e.model, fields=e.fields, fallback_from=e.fallback_from)
+        return _error_result(
+            e.code, e.message, model=e.model, fields=e.fields, fallback_from=e.fallback_from, retry_after=e.retry_after
+        )
     except Exception:
         # handle_generate already logged the traceback; never leak it to the caller.
         return _error_result(ErrorCode.INTERNAL_ERROR)
@@ -225,8 +233,14 @@ async def generate_image(
 
 
 @mcp.tool()
-async def list_models() -> str:
+async def list_models() -> str | ToolResult:
     """List available image generation models."""
+    try:
+        caller = getattr(get_http_request().state, "image_caller", None)
+    except RuntimeError:
+        caller = None
+    if caller is None:
+        return _error_result(ErrorCode.UNAUTHORIZED)
     lines = ["Available models:", ""]
     for i, model_info in enumerate(SUPPORTED_MODELS.values(), 1):
         ratios = ", ".join(model_info.aspect_ratios) if model_info.aspect_ratios else "continuous W:H"

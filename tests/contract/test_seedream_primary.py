@@ -61,8 +61,8 @@ async def test_seedream_invalid_ratio_rejected_before_upstream(client, app, rout
 
 
 @pytest.mark.asyncio
-async def test_pixel_budget_changes_generation_and_cache(client, app):
-    app.state.settings.ark_api_key = "k"
+async def test_pixel_budget_changes_generation_and_cache(monkeypatch, client, app):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     transport = MockTransport(response_data=make_seedream_response())
     app.state.http_client = httpx.AsyncClient(transport=transport)
     body = {"prompt": "poster", "model": PRO, "aspect_ratio": "16:9"}

@@ -17,7 +17,7 @@
               |                  |
      +--------v------------------v--------+
      |         src/middleware/             |
-     |   auth (Bearer) + rate_limit       |
+     |   auth (product service key)       |
      +--------+---------------------------+
               |
      +--------v--------+
@@ -37,10 +37,12 @@
 ## Request flow (POST /v1/generate)
 
 1. `api/generate.py` receives request, validates via Pydantic model
-2. `middleware/auth.py` checks Bearer token (if API_KEY configured)
-3. `middleware/rate_limit.py` checks global + per-IP counters in Redis
+2. `middleware/auth.py` authenticates the product service key for REST and HTTP MCP
+3. Both entry points pass the verified caller to the shared generation service
 4. `services/generator.py` orchestrates:
    - Apply one configurable generation deadline (135s by default); resolve model / quality
+   - `services/admission.py` atomically checks global/product/subject request rates and concurrency in Redis; reject before upstream on overload or admission failure
+   - Hold a bounded per-request lease through generation/cache waits, then release on success, failure or cancellation
    - Compute cache key (SHA-256 of normalized params)
    - Check Redis cache -> return cached result if hit
    - Acquire Redis lock (thundering herd protection)

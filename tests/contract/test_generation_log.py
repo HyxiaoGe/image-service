@@ -56,8 +56,8 @@ async def test_success_then_cached(client, log):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", [None, "doubao-seedream-5-0-flash"])
-async def test_quality_selection_is_logged(client, app, log, model):
-    app.state.settings.ark_api_key = "k"
+async def test_quality_selection_is_logged(monkeypatch, client, app, log, model):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     app.state.http_client = httpx.AsyncClient(transport=MockTransport(response_data=make_seedream_response()))
     args = {"prompt": PROMPT, "quality": "high"}
     if model:
@@ -101,8 +101,8 @@ async def test_unexpected_exception_logged_with_traceback(client, app, log, monk
 
 
 @pytest.mark.asyncio
-async def test_seedream_summary_records_actual_upstream_specification(client, app, log):
-    app.state.settings.ark_api_key = "k"
+async def test_seedream_summary_records_actual_upstream_specification(monkeypatch, client, app, log):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     body = make_seedream_response()
     body["usage"] = {"generated_images": 1, "output_tokens": 9216}
     body["data"][0]["size"] = "1536x1536"

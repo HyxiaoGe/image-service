@@ -80,8 +80,8 @@ def public_dns(monkeypatch):
 
 
 @pytest.fixture
-def web(app) -> Web:
-    app.state.settings.ark_api_key = "k"
+def web(monkeypatch, app) -> Web:
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     transport = Web()
     app.state.http_client = httpx.AsyncClient(transport=transport)
     init_mcp(app.state.settings, app.state.cache, http_client=app.state.http_client)

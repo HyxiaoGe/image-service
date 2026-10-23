@@ -32,8 +32,8 @@ DEFAULT = "gemini-3-pro-image-preview"
         ({"quality": "high", "model": LITE}, LITE),
     ],
 )
-async def test_quality_selects_initial_model(client, app, entry, args, expected):
-    app.state.settings.ark_api_key = "k"
+async def test_quality_selects_initial_model(monkeypatch, client, app, entry, args, expected):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     transport = MockTransport(response_data=make_gemini_response() if expected == DEFAULT else make_seedream_response())
     async with httpx.AsyncClient(transport=transport) as upstream:
         app.state.http_client = upstream

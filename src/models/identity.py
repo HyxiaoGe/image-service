@@ -16,10 +16,6 @@ class CallerIdentity:
     correlation_id: str | None = None
 
     @classmethod
-    def legacy(cls, app_id: str = "legacy", **metadata) -> CallerIdentity:
-        return cls(app_id, "legacy", "legacy", "legacy", "legacy", **metadata)
-
-    @classmethod
     def product(cls, app_id: str, user: str | None, **metadata) -> CallerIdentity:
         """产品由服务密钥认定；用户 ID 由该产品后端在登录校验后声明，只作统计。"""
         if user:

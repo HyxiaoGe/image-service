@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import fakeredis.aioredis
 import httpx
 import pytest
 from fastapi import FastAPI
 
-from src.config import Settings
+from src.config import ProductConfig, Settings
 from src.main import create_app
 from src.mcp.server import init_mcp, mcp
+from src.models.identity import CallerIdentity
 from src.services.cache import CacheService
 
 # A minimal 1x1 red PNG for test fixtures
@@ -80,7 +82,9 @@ def fake_redis():
 
 
 @pytest.fixture
-def settings(tmp_storage: Path) -> Settings:
+def settings(tmp_storage: Path, monkeypatch) -> Settings:
+    monkeypatch.setenv("TEST_SERVICE_KEY", "test-service-key")
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     return Settings(
         litellm_api_key="test-api-key",
         redis_url="redis://localhost:6379/0",
@@ -88,8 +92,17 @@ def settings(tmp_storage: Path) -> Settings:
         static_url_prefix="/static/images",
         default_model="gemini-3-pro-image-preview",
         default_fallback_model=None,  # tests opt in to fallback explicitly
-        rate_limit_global=20,
-        rate_limit_per_ip=5,
+        products={
+            "test": ProductConfig(
+                service_key_env="TEST_SERVICE_KEY", ark_key_env="TEST_ARK_API_KEY", ark_key_alias="test"
+            )
+        },
+        rate_limit_global=1000,
+        rate_limit_product=1000,
+        rate_limit_user=1000,
+        max_concurrent_global=100,
+        max_concurrent_product=100,
+        max_concurrent_user=100,
         rate_limit_window=60,
         cache_ttl_seconds=3600,
         usage_enabled=False,  # 计费记录在专门的集成测试中启用，故障预算用例不引入磁盘时序。
@@ -102,7 +115,19 @@ def mock_transport() -> MockTransport:
 
 
 @pytest.fixture
-def app(settings: Settings, fake_redis, mock_transport: MockTransport) -> FastAPI:
+def app(settings: Settings, fake_redis, mock_transport: MockTransport, monkeypatch) -> FastAPI:
+    # 旧的内存 MCP 单元用例显式提供测试身份上下文；真实 HTTP 测试始终使用中间件身份。
+    from src.mcp import server
+
+    original_request = server.get_http_request
+
+    def authenticated_test_request():
+        try:
+            return original_request()
+        except RuntimeError:
+            return SimpleNamespace(state=SimpleNamespace(image_caller=CallerIdentity.product("test", "test-user")))
+
+    monkeypatch.setattr(server, "get_http_request", authenticated_test_request)
     application = create_app(settings=settings)
 
     cache_service = CacheService(fake_redis, ttl=settings.cache_ttl_seconds)
@@ -122,5 +147,6 @@ async def client(app: FastAPI) -> httpx.AsyncClient:
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
+        headers={"Authorization": "Bearer test-service-key"},
     ) as ac:
         yield ac

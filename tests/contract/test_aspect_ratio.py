@@ -31,8 +31,8 @@ async def test_gemini_payload_carries_aspect_ratio_and_bypasses_litellm_cache(cl
 
 
 @pytest.mark.asyncio
-async def test_seedream_payload_unchanged(client, app):
-    app.state.settings.ark_api_key = "k"
+async def test_seedream_payload_unchanged(monkeypatch, client, app):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     transport = use(app, MockTransport(response_data=make_seedream_response()))
 
     await client.post("/v1/generate", json={"prompt": "x", "model": "doubao-seedream-4-5", "aspect_ratio": "7:5"})
@@ -69,8 +69,8 @@ async def test_flash_31_accepts_extended_ratio(client, app):
 
 
 @pytest.mark.asyncio
-async def test_seedream_accepts_any_ratio(client, app):
-    app.state.settings.ark_api_key = "k"
+async def test_seedream_accepts_any_ratio(monkeypatch, client, app):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     use(app, MockTransport(response_data=make_seedream_response()))
 
     resp = await client.post(

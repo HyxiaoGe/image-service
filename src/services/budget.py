@@ -24,6 +24,10 @@ class GenerationBudget:
     def remaining(self) -> float:
         return max(0, self.deadline - monotonic())
 
+    def cleanup_remaining(self) -> float:
+        """所有清理步骤共用总预算尾部，不能各自再延长请求。"""
+        return max(0, self.deadline + self.cleanup_timeout - monotonic())
+
     async def checkpoint(self) -> None:
         await anyio.lowlevel.checkpoint()
         if self.lifetime is not None and self.lifetime.disconnected.is_set():

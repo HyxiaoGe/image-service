@@ -121,31 +121,31 @@ async def test_upstream_connect_error_after_retries(client, app):
 
 
 @pytest.mark.asyncio
-async def test_seedream_missing_key(client, app):
-    app.state.settings.ark_api_key = ""
+async def test_seedream_missing_key(monkeypatch, client, app):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "")
     data = assert_error(await post(client, model="doubao-seedream-4-5"), 503, "config_missing", False)
     assert data["model"] == "doubao-seedream-4-5"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ark_code", ["InputTextSensitiveContentDetected", "OutputImageSensitiveContentDetected"])
-async def test_seedream_sensitive_content(client, app, ark_code):
-    app.state.settings.ark_api_key = "k"
+async def test_seedream_sensitive_content(monkeypatch, client, app, ark_code):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     body = {"error": {"code": ark_code, "message": "sensitive"}}
     use_transport(app, MockTransport(response_data=body, status_code=400))
     assert_error(await post(client, model="doubao-seedream-4-5"), 422, "content_filtered", False)
 
 
 @pytest.mark.asyncio
-async def test_seedream_no_image(client, app):
-    app.state.settings.ark_api_key = "k"
+async def test_seedream_no_image(monkeypatch, client, app):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     use_transport(app, MockTransport(response_data={"data": []}))
     assert_error(await post(client, model="doubao-seedream-4-5"), 502, "no_image_returned", True)
 
 
 @pytest.mark.asyncio
-async def test_seedream_other_4xx(client, app):
-    app.state.settings.ark_api_key = "k"
+async def test_seedream_other_4xx(monkeypatch, client, app):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     body = {"error": {"code": "InvalidParameter", "message": "bad size"}}
     use_transport(app, MockTransport(response_data=body, status_code=400))
     assert_error(await post(client, model="doubao-seedream-4-5"), 502, "upstream_error", False)
@@ -153,16 +153,16 @@ async def test_seedream_other_4xx(client, app):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ark_code", ["AccountOverdueError", "OperationDenied.ServiceOverdue"])
-async def test_seedream_403_overdue_is_unavailable(client, app, ark_code):
-    app.state.settings.ark_api_key = "k"
+async def test_seedream_403_overdue_is_unavailable(monkeypatch, client, app, ark_code):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     body = {"error": {"code": ark_code, "message": "overdue"}}
     use_transport(app, MockTransport(response_data=body, status_code=403))
     assert_error(await post(client, model="doubao-seedream-5-0-flash"), 502, "upstream_unavailable", True)
 
 
 @pytest.mark.asyncio
-async def test_seedream_403_permission_error_is_not_unavailable(client, app):
-    app.state.settings.ark_api_key = "k"
+async def test_seedream_403_permission_error_is_not_unavailable(monkeypatch, client, app):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     body = {"error": {"code": "AccessDenied", "message": "denied"}}
     use_transport(app, MockTransport(response_data=body, status_code=403))
     assert_error(await post(client, model="doubao-seedream-5-0-flash"), 502, "upstream_error", False)
@@ -170,8 +170,8 @@ async def test_seedream_403_permission_error_is_not_unavailable(client, app):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exc_type", [httpx.ReadTimeout, httpx.WriteTimeout])
-async def test_seedream_submitted_timeout_is_not_retried(client, app, exc_type):
-    app.state.settings.ark_api_key = "k"
+async def test_seedream_submitted_timeout_is_not_retried(monkeypatch, client, app, exc_type):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     transport = RaisingTransport(exc_type)
     use_transport(app, transport)
     assert_error(await post(client, model="doubao-seedream-5-0-flash"), 504, "upstream_timeout", True)
@@ -179,8 +179,8 @@ async def test_seedream_submitted_timeout_is_not_retried(client, app, exc_type):
 
 
 @pytest.mark.asyncio
-async def test_seedream_connection_timeout_still_retries(client, app):
-    app.state.settings.ark_api_key = "k"
+async def test_seedream_connection_timeout_still_retries(monkeypatch, client, app):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     transport = RaisingTransport(httpx.ConnectTimeout)
     use_transport(app, transport)
     assert_error(await post(client, model="doubao-seedream-5-0-flash"), 504, "upstream_timeout", True)
@@ -239,7 +239,7 @@ class TextTransport(httpx.AsyncBaseTransport):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", ["gemini-3-pro-image-preview", "doubao-seedream-4-5"])
-async def test_non_json_200_is_no_image(client, app, model):
-    app.state.settings.ark_api_key = "k"
+async def test_non_json_200_is_no_image(monkeypatch, client, app, model):
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     use_transport(app, TextTransport())
     assert_error(await post(client, model=model), 502, "no_image_returned", True)

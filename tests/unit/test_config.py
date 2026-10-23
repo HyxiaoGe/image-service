@@ -23,7 +23,7 @@ def test_gemini_models_default_to_chat_endpoint():
 
 def test_ark_settings_defaults():
     s = Settings(_env_file=None)
-    assert s.ark_api_key == ""
+    assert s.auth_mode == "required"
     assert s.ark_base_url == "https://ark.cn-beijing.volces.com/api/v3"
     # Default Seedream version is pinned to 4.5 (better Chinese text rendering).
     assert s.ark_model_id == "doubao-seedream-4-5-251128"

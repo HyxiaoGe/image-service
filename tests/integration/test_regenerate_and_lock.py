@@ -44,7 +44,7 @@ def stored_path(settings, image_url: str) -> Path:
 
 
 def key_for(settings) -> str:
-    return compute_cache_key(PAYLOAD["prompt"], settings.default_model, "1:1", "1024x1024", None)
+    return compute_cache_key(PAYLOAD["prompt"], settings.default_model, "1:1", "1024x1024", None, namespace="test")
 
 
 # --- no_cache ---------------------------------------------------------------

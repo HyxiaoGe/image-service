@@ -568,10 +568,10 @@ async def test_no_hint_without_found_images(client, web, app, case):
 
 
 @pytest.mark.asyncio
-async def test_hint_reaches_seedream_fallback(client, web, app):
+async def test_hint_reaches_seedream_fallback(monkeypatch, client, web, app):
     from tests.conftest import make_seedream_response
 
-    app.state.settings.ark_api_key = "k"
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     original = web.handle_async_request
 
     async def route(request):

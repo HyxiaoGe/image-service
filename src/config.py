@@ -194,24 +194,24 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8090
     service_base_url: str = "http://localhost:8090"
-    api_key: str | None = None
-    auth_mode: Literal["legacy", "mixed", "required"] = "legacy"
-    legacy_app_id: str = Field("legacy", pattern=r"^[a-zA-Z0-9_.-]{1,64}$")
-    allow_legacy_anonymous: bool = False
+    auth_mode: Literal["required"] = "required"
     products: dict[str, ProductConfig] = Field(default_factory=dict)
     usage_enabled: bool = True
     usage_db_path: str | None = None
     usage_retention_days: int = Field(90, ge=90)
-    rate_limit_global: int = 20
-    rate_limit_per_ip: int = 5
-    rate_limit_window: int = 60
+    rate_limit_global: int = Field(20, ge=1)
+    rate_limit_product: int = Field(20, ge=1)
+    rate_limit_user: int = Field(5, ge=1)
+    rate_limit_window: int = Field(60, ge=1, le=3600)
+    max_concurrent_global: int = Field(6, ge=1)
+    max_concurrent_product: int = Field(4, ge=1)
+    max_concurrent_user: int = Field(2, ge=1)
     cache_ttl_seconds: int = 604800  # 7 days
     generation_timeout_seconds: float = Field(135, gt=0, allow_inf_nan=False)
     model_timeout_seconds: float = Field(60, gt=0, allow_inf_nan=False)
     seedream_pro_timeout_seconds: float = Field(105, gt=0, allow_inf_nan=False)
     fallback_reserve_seconds: float = Field(30, ge=0, allow_inf_nan=False)
     min_model_budget_seconds: float = Field(5, gt=0, allow_inf_nan=False)
-    ark_api_key: str = Field("", description="Volcengine Ark API key (Seedream)")
     ark_base_url: str = Field(
         "https://ark.cn-beijing.volces.com/api/v3",
         description="Ark OpenAI-compatible base URL",

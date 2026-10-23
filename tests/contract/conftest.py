@@ -43,8 +43,8 @@ class RoutingTransport(httpx.AsyncBaseTransport):
 
 
 @pytest.fixture
-def routing(app) -> RoutingTransport:
-    app.state.settings.ark_api_key = "k"
+def routing(monkeypatch, app) -> RoutingTransport:
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     app.state.settings.dashscope_api_key = "dk"
     transport = RoutingTransport()
     app.state.http_client = httpx.AsyncClient(transport=transport)

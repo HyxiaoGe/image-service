@@ -40,7 +40,6 @@ WEB_AND_IMAGE = {"googleSearch": {"searchTypes": {"webSearch": {}, "imageSearch"
 
 
 def use(app, transport: httpx.AsyncBaseTransport):
-    app.state.settings.ark_api_key = "k"
     app.state.http_client = httpx.AsyncClient(transport=transport)
     init_mcp(app.state.settings, app.state.cache, http_client=app.state.http_client)
     return transport

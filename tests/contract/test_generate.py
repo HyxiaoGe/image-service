@@ -93,9 +93,9 @@ async def test_generate_upstream_error(
 
 
 @pytest.mark.asyncio
-async def test_generate_seedream_success(client: httpx.AsyncClient, app):
+async def test_generate_seedream_success(monkeypatch, client: httpx.AsyncClient, app):
     """Seedream 路径：返回图片 URL，model 为 seedream 别名。"""
-    app.state.settings.ark_api_key = "test-ark-key"
+    monkeypatch.setenv("TEST_ARK_API_KEY", "test-ark-key")
     app.state.http_client = httpx.AsyncClient(transport=MockTransport(response_data=make_seedream_response()))
 
     resp = await client.post(
@@ -112,9 +112,9 @@ async def test_generate_seedream_success(client: httpx.AsyncClient, app):
 
 
 @pytest.mark.asyncio
-async def test_generate_seedream_request_body(client: httpx.AsyncClient, app):
+async def test_generate_seedream_request_body(monkeypatch, client: httpx.AsyncClient, app):
     """Seedream 请求体含 watermark=false / b64_json / 鉴权头，且无 modalities。"""
-    app.state.settings.ark_api_key = "test-ark-key"
+    monkeypatch.setenv("TEST_ARK_API_KEY", "test-ark-key")
     transport = MockTransport(response_data=make_seedream_response())
     app.state.http_client = httpx.AsyncClient(transport=transport)
 
@@ -146,10 +146,10 @@ async def test_generate_seedream_request_body(client: httpx.AsyncClient, app):
     ],
 )
 async def test_generate_seedream_50_request_body(
-    client: httpx.AsyncClient, app, model: str, wire_id: str, expected_size: str
+    monkeypatch, client: httpx.AsyncClient, app, model: str, wire_id: str, expected_size: str
 ):
     """5.0 models send their pinned wire id and omit sequential_image_generation (Ark 400s on it)."""
-    app.state.settings.ark_api_key = "test-ark-key"
+    monkeypatch.setenv("TEST_ARK_API_KEY", "test-ark-key")
     transport = MockTransport(response_data=make_seedream_response())
     app.state.http_client = httpx.AsyncClient(transport=transport)
 
@@ -165,9 +165,9 @@ async def test_generate_seedream_50_request_body(
 
 
 @pytest.mark.asyncio
-async def test_generate_seedream_explicit_landscape_size(client: httpx.AsyncClient, app):
+async def test_generate_seedream_explicit_landscape_size(monkeypatch, client: httpx.AsyncClient, app):
     """A 16:9 request locks a landscape size instead of letting Seedream pick."""
-    app.state.settings.ark_api_key = "test-ark-key"
+    monkeypatch.setenv("TEST_ARK_API_KEY", "test-ark-key")
     transport = MockTransport(response_data=make_seedream_response())
     app.state.http_client = httpx.AsyncClient(transport=transport)
 
@@ -181,9 +181,9 @@ async def test_generate_seedream_explicit_landscape_size(client: httpx.AsyncClie
 
 
 @pytest.mark.asyncio
-async def test_generate_seedream_missing_key(client: httpx.AsyncClient, app):
+async def test_generate_seedream_missing_key(monkeypatch, client: httpx.AsyncClient, app):
     """未配置 ARK_API_KEY → 503 config_missing。"""
-    app.state.settings.ark_api_key = ""
+    monkeypatch.setenv("TEST_ARK_API_KEY", "")
     app.state.http_client = httpx.AsyncClient(transport=MockTransport(response_data=make_seedream_response()))
 
     resp = await client.post(
@@ -196,9 +196,9 @@ async def test_generate_seedream_missing_key(client: httpx.AsyncClient, app):
 
 
 @pytest.mark.asyncio
-async def test_generate_seedream_upstream_error(client: httpx.AsyncClient, app):
+async def test_generate_seedream_upstream_error(monkeypatch, client: httpx.AsyncClient, app):
     """Ark 5xx → 502 upstream_unavailable，上游原文不回给调用方。"""
-    app.state.settings.ark_api_key = "test-ark-key"
+    monkeypatch.setenv("TEST_ARK_API_KEY", "test-ark-key")
     app.state.http_client = httpx.AsyncClient(
         transport=MockTransport(
             response_data={"error": {"message": "quota exceeded"}},

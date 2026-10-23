@@ -39,7 +39,7 @@
 | 🖼️ **参考图** | `reference_images` 传图片 URL；`reference_subject` 自动搜真实照片作参考，让真实产品画得准 |
 | 🔎 **搜索增强** | `grounding` 让 Gemini 先联网搜索再出图 |
 | ⚡ **缓存** | Redis 缓存 7 天，同样的请求直接返回；并发相同请求只生成一次 |
-| 🛡️ **防护** | Bearer token 鉴权、全局 / 单 IP 限流、参考图只允许公网地址 |
+| 🛡️ **防护** | 产品服务密钥鉴权、全局 / 产品 / 用户限流和并发控制、参考图只允许公网地址 |
 | 📈 **可观测** | 每次请求一条结构化汇总日志，Prometheus 指标在 `/metrics` |
 
 ## 目录
@@ -62,13 +62,13 @@
 | REST | `POST /v1/generate`、`GET /v1/models`、`GET /v1/health` |
 | MCP | `generate_image`、`list_models`（路径 `/mcp`） |
 
-产品身份、多方舟 Key、持久化用量和兼容迁移见[产品归因接入说明](docs/PRODUCT_ATTRIBUTION.md)。各产品用自己的服务密钥调用、由密钥决定产品和方舟 Key；默认 `AUTH_MODE=legacy` 同时保持既有调用行为。
+产品身份、多方舟 Key、持久化用量和统一限流见[产品归因接入说明](docs/PRODUCT_ATTRIBUTION.md)。各产品用自己的服务密钥调用、由密钥决定产品和方舟 Key；默认且仅支持严格产品密钥认证，匿名和旧共享 Key 均被拒绝。
 
 **出一张图**
 
 ```bash
 curl -s http://localhost:8090/v1/generate \
-  -H "Authorization: Bearer $API_KEY" \
+  -H "Authorization: Bearer $FUSION_SERVICE_KEY" \
   -H "Content-Type: application/json" \
   -d '{"prompt": "A lighthouse on a rocky coast at sunset, photorealistic", "aspect_ratio": "16:9"}'
 ```
@@ -88,7 +88,7 @@ curl -s http://localhost:8090/v1/generate \
 }
 ```
 
-REST 返回的 `image_url` 是相对路径，拼上服务地址即可访问；MCP 返回的已经是完整 URL。没有配置 `API_KEY` 时不需要 `Authorization` 头。其他常用参数：`model`、`quality`、`size`、`style`、`fallback_model`、`grounding`、`reference_images`、`reference_subject`、`no_cache`，完整说明见 `/docs`（FastAPI 自动生成）。
+REST 返回的 `image_url` 是相对路径，拼上服务地址即可访问；MCP 返回的已经是完整 URL。REST 和 MCP 均须携带产品服务密钥；产品身份不由工具参数决定。其他常用参数：`model`、`quality`、`size`、`style`、`fallback_model`、`grounding`、`reference_images`、`reference_subject`、`no_cache`，完整说明见 `/docs`（FastAPI 自动生成）。
 
 ### 按画质偏好选择模型
 
@@ -109,7 +109,7 @@ REST 和 MCP `generate_image` 都支持可选的 `quality`，由调用方根据�
 **本地开发**
 
 ```bash
-cp .env.example .env                                                  # 填 LITELLM_* / ARK_API_KEY / DASHSCOPE_API_KEY / REDIS_URL
+cp .env.example .env                                                  # 填 PRODUCTS / 产品服务密钥与方舟 Key / LITELLM_* / DASHSCOPE_API_KEY / REDIS_URL
 uv run uvicorn src.main:create_app --factory --reload --port 8090    # 启动
 uv run pytest                                                         # 测试
 ruff check . && ruff format .                                         # lint + 格式化

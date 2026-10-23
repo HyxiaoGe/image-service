@@ -17,6 +17,7 @@ from mcp.server.lowlevel.server import request_ctx
 
 from mcp import types
 from src.mcp.server import init_mcp
+from src.models.identity import CallerIdentity
 from src.models.lifetime import RequestLifetime
 from src.models.request import GenerateRequest
 from src.services import generator
@@ -66,7 +67,7 @@ def budget_app(app, monkeypatch):
     settings.seedream_pro_timeout_seconds = 0.4
     settings.fallback_reserve_seconds = 0.15
     settings.min_model_budget_seconds = 0.02
-    settings.ark_api_key = "k"
+    monkeypatch.setenv("TEST_ARK_API_KEY", "k")
     settings.dashscope_api_key = "dk"
     recorder = RecordingLogger()
     monkeypatch.setattr(generator, "logger", recorder)
@@ -81,6 +82,7 @@ def install(app, transport):
 
 async def no_outputs(app):
     assert await app.state.cache.redis.keys("lock:image:*") == []
+    assert await app.state.cache.redis.keys("admission:image:v1:active:*") == []
     assert await app.state.cache.redis.keys("image:*") == []
     assert list(Path(app.state.settings.storage_dir).iterdir()) == []
 
@@ -183,7 +185,7 @@ async def test_reference_search_is_inside_total_budget(client, budget_app, monke
 async def test_cache_wait_uses_total_budget_without_releasing_another_requests_lock(client, budget_app):
     app = budget_app
     app.state.settings.generation_timeout_seconds = 0.1
-    key = compute_cache_key(BODY["prompt"], GEMINI, "1:1", "1024x1024", None)
+    key = compute_cache_key(BODY["prompt"], GEMINI, "1:1", "1024x1024", None, namespace="test")
     await app.state.cache.redis.set(f"lock:image:{key}", "someone-else", ex=60)
     transport = BlockingTransport()
     install(app, transport)
@@ -206,6 +208,7 @@ async def test_cancellation_stops_generation_and_releases_lock(budget_app, disco
             app.state.cache,
             http_client=app.state.http_client,
             lifetime=lifetime,
+            caller=CallerIdentity.product("test", "test-user"),
         )
     )
     await asyncio.wait_for(transport.started.wait(), 1)
@@ -252,7 +255,11 @@ async def test_anyio_cancellation_shields_bounded_lock_cleanup(budget_app):
     install(app, transport)
     with anyio.move_on_after(0.04):
         await generator.handle_generate(
-            GenerateRequest(**BODY), app.state.settings, app.state.cache, http_client=app.state.http_client
+            GenerateRequest(**BODY),
+            app.state.settings,
+            app.state.cache,
+            http_client=app.state.http_client,
+            caller=CallerIdentity.product("test", "test-user"),
         )
     assert transport.cancelled.is_set()
     await no_outputs(app)
@@ -295,6 +302,7 @@ async def test_actual_http_disconnect_cancels_rest_and_stateless_mcp(budget_app,
         "client": ("127.0.0.1", 12345),
         "headers": [
             (b"host", b"localhost:8090"),
+            (b"authorization", b"Bearer test-service-key"),
             (b"content-type", b"application/json"),
             (b"accept", b"application/json, text/event-stream"),
             (b"mcp-protocol-version", b"2025-06-18"),
@@ -372,6 +380,7 @@ async def test_cancel_during_retry_backoff_does_not_try_again_or_fall_back(budge
                 app.state.settings,
                 app.state.cache,
                 http_client=app.state.http_client,
+                caller=CallerIdentity.product("test", "test-user"),
             )
         )
         await asyncio.wait_for(backoff.wait(), 1)
@@ -417,6 +426,7 @@ async def test_disconnect_at_primary_failure_does_not_start_backup(budget_app):
             app.state.cache,
             http_client=app.state.http_client,
             lifetime=lifetime,
+            caller=CallerIdentity.product("test", "test-user"),
         )
     assert len(calls) == 1
     await no_outputs(app)
@@ -434,6 +444,7 @@ async def test_expired_request_never_submits_a_generation(budget_app):
             app.state.cache,
             http_client=app.state.http_client,
             lifetime=RequestLifetime(started_at=time.monotonic() - 1),
+            caller=CallerIdentity.product("test", "test-user"),
         )
     assert error.value.code.value == "upstream_timeout"
     assert not transport.calls

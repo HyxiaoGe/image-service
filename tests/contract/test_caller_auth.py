@@ -14,7 +14,6 @@ VALIDATION_KEY = "validation-service-secret"
 @pytest.fixture
 def secured(app, monkeypatch):
     s = app.state.settings
-    s.auth_mode = "required"
     s.products = {
         "fusion": ProductConfig(
             service_key_env="TEST_FUSION_SERVICE_KEY", ark_key_env="TEST_FUSION_ARK_KEY", ark_key_alias="fusion"
@@ -52,7 +51,7 @@ async def test_unknown_service_key_cannot_submit(client, secured, bearer):
 
 
 async def test_missing_identity_rejected_before_upstream(client, secured):
-    assert (await client.post("/v1/generate", json={"prompt": "x"})).status_code == 401
+    assert (await client.post("/v1/generate", headers={"Authorization": ""}, json={"prompt": "x"})).status_code == 401
     assert secured.call_count == 0
 
 
@@ -77,7 +76,7 @@ async def test_products_use_own_key_and_cache(client, app, secured):
 
 
 async def test_missing_product_key_never_borrows_default(client, app, secured, monkeypatch):
-    app.state.settings.ark_api_key = "legacy-secret"
+    monkeypatch.setenv("ARK_API_KEY", "legacy-secret")
     monkeypatch.delenv("TEST_FUSION_ARK_KEY")
     response = await generate(client, FUSION_KEY)
     assert response.status_code == 503
@@ -86,41 +85,8 @@ async def test_missing_product_key_never_borrows_default(client, app, secured, m
 
 
 async def test_usage_endpoint_never_public(client):
-    response = await client.get("/v1/usage")
+    response = await client.get("/v1/usage", headers={"Authorization": ""})
     assert response.status_code == 401
-
-
-async def test_mixed_mode_keeps_controlled_legacy_and_rejects_bad_keys(client, app, secured):
-    s = app.state.settings
-    s.auth_mode = "mixed"
-    s.api_key = "transition-secret"
-    s.ark_api_key = "legacy-ark-secret"
-    s.allow_legacy_anonymous = True
-    assert (await generate(client, "bad-key")).status_code == 401
-    assert secured.call_count == 0
-    response = await generate(client, "transition-secret")
-    assert response.status_code == 200
-    assert secured.last_request.headers["authorization"] == "Bearer legacy-ark-secret"
-    response = await generate(client, FUSION_KEY, no_cache=True)
-    assert response.status_code == 200
-    assert secured.last_request.headers["authorization"] == "Bearer fusion-upstream-secret"
-    assert (await client.get("/v1/usage", headers={"Authorization": "Bearer transition-secret"})).status_code == 401
-
-
-async def test_legacy_mode_recognizes_product_keys_and_keeps_anonymous_reads(client, app, secured):
-    s = app.state.settings
-    s.auth_mode = "legacy"
-    s.ark_api_key = "legacy-ark-secret"
-    response = await generate(client, FUSION_KEY)
-    assert response.status_code == 200
-    assert secured.last_request.headers["authorization"] == "Bearer fusion-upstream-secret"
-    assert (await client.get("/v1/models")).status_code == 200
-
-
-async def test_required_mode_never_accepts_legacy_secret(client, app, secured):
-    app.state.settings.api_key = "old-secret"
-    assert (await generate(client, "old-secret")).status_code == 401
-    assert secured.call_count == 0
 
 
 async def test_usage_cannot_select_another_product(client, app, secured):
@@ -133,3 +99,35 @@ def test_products_cannot_share_a_service_key(tmp_storage):
     product = {"service_key_env": "SHARED_SERVICE_KEY", "ark_key_env": "ARK_A", "ark_key_alias": "a"}
     with pytest.raises(ValidationError):
         Settings(storage_dir=str(tmp_storage), products={"a": product, "b": {**product, "ark_key_alias": "b"}})
+
+
+@pytest.mark.parametrize("mode", ["legacy", "mixed"])
+def test_removed_auth_modes_fail_configuration(mode):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, auth_mode=mode)
+
+
+async def test_old_shared_key_does_not_authenticate(client, secured, monkeypatch):
+    monkeypatch.setenv("API_KEY", "old-secret")
+    assert (await generate(client, "old-secret")).status_code == 401
+    assert secured.call_count == 0
+
+
+async def test_duplicate_service_key_values_fail_closed(client, secured, monkeypatch):
+    monkeypatch.setenv("TEST_VALIDATION_SERVICE_KEY", FUSION_KEY)
+    assert (await generate(client, FUSION_KEY)).status_code == 401
+    assert secured.call_count == 0
+
+
+async def test_in_memory_mcp_without_http_identity_cannot_generate(app, mock_transport, monkeypatch):
+    from fastmcp import Client
+
+    def no_request():
+        raise RuntimeError("No HTTP context")
+
+    monkeypatch.setattr("src.mcp.server.get_http_request", no_request)
+    async with Client(app.state.mcp) as mcp_client:
+        for name, args in [("generate_image", {"prompt": "cup"}), ("list_models", {})]:
+            result = await mcp_client.call_tool(name, args)
+            assert result.structured_content["error"]["code"] == "unauthorized"
+    assert mock_transport.call_count == 0

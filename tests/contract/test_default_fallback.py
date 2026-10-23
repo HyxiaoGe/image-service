@@ -254,7 +254,9 @@ async def test_chain_skips_ratio_unsupported_backups(client, chain, app):
 async def test_single_default_keeps_its_cache_key(client, backup, app):
     """A one-model chain keys exactly like the old single fallback, so its cache survives."""
     first = (await post(client)).json()
-    key = compute_cache_key("an avengers poster", GEMINI, "1:1", "1024x1024", None, SEEDREAM, False, None, None)
+    key = compute_cache_key(
+        "an avengers poster", GEMINI, "1:1", "1024x1024", None, SEEDREAM, False, None, None, namespace="test"
+    )
     assert (await app.state.cache.get_cached(key))["id"] == first["id"]
 
     app.state.settings.default_fallback_model = f"{SEEDREAM},{QWEN}"
