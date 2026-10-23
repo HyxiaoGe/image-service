@@ -65,7 +65,9 @@
 
 产品身份、多方舟 Key、持久化用量和统一限流见[产品归因接入说明](docs/PRODUCT_ATTRIBUTION.md)。各产品用自己的服务密钥调用、由密钥决定产品和方舟 Key；默认且仅支持严格产品密钥认证，匿名和旧共享 Key 均被拒绝。
 
-官方账单查询还需配置有账单只读权限的火山引擎 `BILLING_ACCESS_KEY` / `BILLING_SECRET_KEY`、`BILLING_ENABLED=true`，并在各产品配置中填写 `ark_resource_id`。默认关闭；详见[官方分账查询](docs/PRODUCT_ATTRIBUTION.md#官方分账查询)。
+官方账单查询还需配置有账单只读权限的火山引擎 `ARK_BILLING_ACCESS_KEY` / `ARK_BILLING_SECRET_KEY`、`ARK_BILLING_ENABLED=true`，并在各产品配置中填写 `ark_resource_id`。默认关闭；详见[官方分账查询](docs/PRODUCT_ATTRIBUTION.md#官方分账查询)。
+
+平台配置统一使用 `ARK_*` / `DASHSCOPE_*` / `LITELLM_*` 前缀，产品专用上游 Key 使用 `ARK_FUSION_API_KEY` 等名称。升级旧的 `BILLING_*` 和产品 Key 名称时需同步修改 `PRODUCTS` 引用，见[配置命名与迁移](docs/PRODUCT_ATTRIBUTION.md#配置)。
 
 **出一张图**
 

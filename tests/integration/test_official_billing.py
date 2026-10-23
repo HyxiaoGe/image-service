@@ -43,9 +43,9 @@ def response(rows=None, total=None, **fields):
 @pytest.fixture
 def official(app):
     settings = app.state.settings
-    settings.billing_enabled = True
-    settings.billing_access_key = SecretStr(AK)
-    settings.billing_secret_key = SecretStr(SK)
+    settings.ark_billing_enabled = True
+    settings.ark_billing_access_key = SecretStr(AK)
+    settings.ark_billing_secret_key = SecretStr(SK)
     settings.products["test"].ark_resource_id = RESOURCE
     calls, replies = [], [response()]
 
@@ -191,7 +191,7 @@ async def test_product_and_credential_cache_isolation(client, app, official, mon
     )
     assert result.json()["app_id"] == "other" and result.json()["cached"] is False
     assert json.loads(official[0][-1].content)["SplitItemID"] == "apikey-other"
-    app.state.settings.billing_access_key = SecretStr("new-account-access-key")
+    app.state.settings.ark_billing_access_key = SecretStr("new-account-access-key")
     official[1][0] = response()
     assert (await get(client)).json()["cached"] is False
     assert len(official[0]) == 3
@@ -202,11 +202,11 @@ async def test_unconfigured_returns_503_even_with_cached_data(client, app, offic
     assert (await get(client)).status_code == 200
     s = app.state.settings
     if parameter == "disabled":
-        s.billing_enabled = False
+        s.ark_billing_enabled = False
     elif parameter == "ak":
-        s.billing_access_key = SecretStr("")
+        s.ark_billing_access_key = SecretStr("")
     elif parameter == "sk":
-        s.billing_secret_key = SecretStr("")
+        s.ark_billing_secret_key = SecretStr("")
     else:
         s.products["test"].ark_resource_id = None
     result = await get(client)
@@ -270,6 +270,6 @@ async def test_redis_failure_and_total_timeout_do_not_publish_partial_money(
 
 
 def test_billing_secrets_are_redacted_in_configuration(settings):
-    settings.billing_access_key = SecretStr(AK)
-    settings.billing_secret_key = SecretStr(SK)
+    settings.ark_billing_access_key = SecretStr(AK)
+    settings.ark_billing_secret_key = SecretStr(SK)
     assert AK not in repr(settings) and SK not in repr(settings)

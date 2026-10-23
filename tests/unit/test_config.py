@@ -1,6 +1,50 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from src.config import SUPPORTED_MODELS, Settings
+
+
+@pytest.mark.parametrize("source", ["environment", "dotenv"])
+def test_platform_prefixed_billing_and_product_key_configuration(tmp_path, monkeypatch, source):
+    values = {
+        "ARK_BILLING_ENABLED": "true",
+        "ARK_BILLING_ACCESS_KEY": "ark-billing-test-ak",
+        "ARK_BILLING_SECRET_KEY": "ark-billing-test-sk",
+        "ARK_BILLING_REGION": "cn-beijing",
+        "ARK_BILLING_PRODUCT_CODE": "Doubao-Seedream",
+        "DASHSCOPE_API_KEY": "separate-dashscope-test-key",
+        "PRODUCTS": json.dumps(
+            {
+                "fusion": {
+                    "service_key_env": "FUSION_SERVICE_KEY",
+                    "ark_key_env": "ARK_FUSION_API_KEY",
+                    "ark_key_alias": "fusion",
+                    "ark_resource_id": "apikey-test-fusion",
+                }
+            }
+        ),
+    }
+    for key in values:
+        monkeypatch.delenv(key, raising=False)
+    if source == "environment":
+        for key, value in values.items():
+            monkeypatch.setenv(key, value)
+        settings = Settings(_env_file=None)
+    else:
+        path = tmp_path / ".env"
+        path.write_text("# 平台配置\n" + "\n".join(f"{k}={v}" for k, v in values.items()), encoding="utf-8")
+        settings = Settings(_env_file=path)
+    assert settings.ark_billing_enabled is True
+    assert settings.ark_billing_access_key.get_secret_value() == values["ARK_BILLING_ACCESS_KEY"]
+    assert settings.ark_billing_secret_key.get_secret_value() == values["ARK_BILLING_SECRET_KEY"]
+    assert settings.ark_billing_region == values["ARK_BILLING_REGION"]
+    assert settings.ark_billing_product_code == values["ARK_BILLING_PRODUCT_CODE"]
+    assert settings.dashscope_api_key == values["DASHSCOPE_API_KEY"]
+    assert settings.products["fusion"].ark_key_env == "ARK_FUSION_API_KEY"
+    assert values["ARK_BILLING_SECRET_KEY"] not in repr(settings)
 
 
 def test_seedream_model_registered_as_images_endpoint():

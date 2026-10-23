@@ -199,11 +199,12 @@ class Settings(BaseSettings):
     usage_enabled: bool = True
     usage_db_path: str | None = None
     usage_retention_days: int = Field(90, ge=90)
-    billing_enabled: bool = False
-    billing_access_key: SecretStr = SecretStr("")
-    billing_secret_key: SecretStr = SecretStr("")
-    billing_region: str = Field("cn-beijing", pattern=r"^[a-z0-9-]{1,40}$")
-    billing_product_code: str = Field("Doubao-Seedream", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    # Billing credentials belong to Ark; future providers get their own prefix.
+    ark_billing_enabled: bool = False
+    ark_billing_access_key: SecretStr = SecretStr("")
+    ark_billing_secret_key: SecretStr = SecretStr("")
+    ark_billing_region: str = Field("cn-beijing", pattern=r"^[a-z0-9-]{1,40}$")
+    ark_billing_product_code: str = Field("Doubao-Seedream", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     rate_limit_global: int = Field(20, ge=1)
     rate_limit_product: int = Field(20, ge=1)
     rate_limit_user: int = Field(5, ge=1)

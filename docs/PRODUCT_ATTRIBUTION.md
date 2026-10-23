@@ -28,15 +28,26 @@ REST `/v1/generate`、`/v1/models`、`/v1/usage`、`/v1/billing` 和整个 HTTP 
 
 ## 配置
 
+平台配置使用 `<平台>_<用途>`，产品专用上游 Key 使用 `<平台>_<产品>_API_KEY`。`ARK` 表示火山方舟，`DASHSCOPE` 表示阿里百炼，`LITELLM` 表示代理平台。产品访问 image-service 的 `FUSION_SERVICE_KEY` / `VALIDATION_SERVICE_KEY` 不属于上游平台，保留产品前缀。`PRODUCTS` 中的 `ark_key_env` 引用相应环境变量名，`ark_resource_id` 仍是方舟 Key 的非秘密资源 ID。
+
+| 配置用途 | 当前命名 |
+|---|---|
+| 方舟生图 | `ARK_BASE_URL`、`ARK_MODEL_ID`、`ARK_FUSION_API_KEY`、`ARK_VALIDATION_API_KEY` |
+| 方舟官方账单 | `ARK_BILLING_ENABLED`、`ARK_BILLING_ACCESS_KEY`、`ARK_BILLING_SECRET_KEY`、`ARK_BILLING_REGION`、`ARK_BILLING_PRODUCT_CODE` |
+| 百炼生图 | `DASHSCOPE_BASE_URL`、`DASHSCOPE_API_KEY` |
+| LiteLLM 代理 | `LITELLM_BASE_URL`、`LITELLM_API_KEY` |
+
+从旧配置升级时，将 `BILLING_*` 五项改名为 `ARK_BILLING_*`，`FUSION_ARK_API_KEY` / `VALIDATION_ARK_API_KEY` 改为 `ARK_FUSION_API_KEY` / `ARK_VALIDATION_API_KEY`，并同步修改 `PRODUCTS` 内的 `ark_key_env` 引用；值、别名和资源 ID 保持原值，重建容器生效。旧账单环境变量名不再读取，不保留两套配置。未来百炼账单可使用 `DASHSCOPE_BILLING_*`，产品 Key 可使用 `DASHSCOPE_<产品>_API_KEY`；当前尚未实现百炼官方账单查询。
+
 在方舟创建产品专用 Key，并为每个产品生成独立的服务密钥（如 `openssl rand -hex 32`），配置在 image-service 宿主机 `.env`：
 
 ```dotenv
 AUTH_MODE=required
-PRODUCTS={"fusion":{"service_key_env":"FUSION_SERVICE_KEY","ark_key_env":"FUSION_ARK_API_KEY","ark_key_alias":"fusion","ark_resource_id":"<非秘密的Key资源ID>"},"validation":{"service_key_env":"VALIDATION_SERVICE_KEY","ark_key_env":"VALIDATION_ARK_API_KEY","ark_key_alias":"validation"}}
+PRODUCTS={"fusion":{"service_key_env":"FUSION_SERVICE_KEY","ark_key_env":"ARK_FUSION_API_KEY","ark_key_alias":"fusion","ark_resource_id":"<非秘密的Key资源ID>"},"validation":{"service_key_env":"VALIDATION_SERVICE_KEY","ark_key_env":"ARK_VALIDATION_API_KEY","ark_key_alias":"validation"}}
 FUSION_SERVICE_KEY=<Fusion服务密钥>
-FUSION_ARK_API_KEY=<Fusion专用方舟Key>
+ARK_FUSION_API_KEY=<Fusion专用方舟Key>
 VALIDATION_SERVICE_KEY=<验证服务密钥>
-VALIDATION_ARK_API_KEY=<验证专用方舟Key>
+ARK_VALIDATION_API_KEY=<验证专用方舟Key>
 ```
 
 示例中的 Key 和资源 ID 都是占位。各产品不能共用同一个服务密钥变量；未配置服务密钥的产品无法被匹配。缺少专用方舟 Key 时该产品的 Seedream 调用明确失败（`config_missing`），不借用其他产品或旧共享 Key。
@@ -92,14 +103,14 @@ Authorization: Bearer <该产品的服务密钥>
 需在火山引擎开通按 API Key 分账，并将有账单只读权限的 IAM AK/SK 写入 image-service 宿主机 `.env` 后重建容器。这组凭证不同于方舟生图 API Key；不应提供给 Fusion、MCP 调用方或模型。已有产品配置必须填写对应 Key 的非秘密资源 ID `ark_resource_id=apikey-...`。
 
 ```dotenv
-BILLING_ENABLED=true
-BILLING_ACCESS_KEY=<火山引擎账单只读AK>
-BILLING_SECRET_KEY=<火山引擎账单只读SK>
-BILLING_REGION=cn-beijing
-BILLING_PRODUCT_CODE=Doubao-Seedream
+ARK_BILLING_ENABLED=true
+ARK_BILLING_ACCESS_KEY=<火山引擎账单只读AK>
+ARK_BILLING_SECRET_KEY=<火山引擎账单只读SK>
+ARK_BILLING_REGION=cn-beijing
+ARK_BILLING_PRODUCT_CODE=Doubao-Seedream
 ```
 
-默认 `BILLING_ENABLED=false`。未启用、缺凭证或缺产品资源 ID 返回 503 `billing_not_configured`，不影响生图。AK/SK 使用 SecretStr 遮蔽配置表示，服务不记录签名、凭证或原始账单，只缓存白名单汇总。
+默认 `ARK_BILLING_ENABLED=false`。未启用、缺凭证或缺产品资源 ID 返回 503 `billing_not_configured`，不影响生图。AK/SK 使用 SecretStr 遮蔽配置表示，服务不记录签名、凭证或原始账单，只缓存白名单汇总。
 
 调用官方 `ListSplitBillDetail`，使用 `Product=["Doubao-Seedream"]`、`SplitDimension="{\"Doubao-Seedream\":\"apikey_id\"}"` 和本产品 `SplitItemID`。2026-10-23 在官方 API Explorer 实测，该组合能读取 Fusion Key 的 0.12 元应付与实付；通用示例的 `ark_bd` 并非 Seedream 图片产品代码。调用方不能传资源 ID 或产品 ID 来查询其他产品；返回行也逐条核验产品代码、资源、账期及人民币币种。
 

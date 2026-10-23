@@ -96,9 +96,9 @@ async def _page(client: httpx.AsyncClient, settings: Settings, payload: dict, re
         body,
         None,
         QUERY,
-        settings.billing_access_key.get_secret_value(),
-        settings.billing_secret_key.get_secret_value(),
-        settings.billing_region,
+        settings.ark_billing_access_key.get_secret_value(),
+        settings.ark_billing_secret_key.get_secret_value(),
+        settings.ark_billing_region,
         "billing",
     )
     # 不发送原始 SK，不跟随重定向，不在日志中输出签名头或原始响应。
@@ -142,8 +142,8 @@ async def _collect(client, settings: Settings, redis, app_id: str, resource_id: 
                 "Limit": PAGE_SIZE,
                 "NeedRecordNum": 1,
                 "IgnoreZero": 0,
-                "Product": [settings.billing_product_code],
-                "SplitDimension": json.dumps({settings.billing_product_code: "apikey_id"}, separators=(",", ":")),
+                "Product": [settings.ark_billing_product_code],
+                "SplitDimension": json.dumps({settings.ark_billing_product_code: "apikey_id"}, separators=(",", ":")),
                 "SplitItemID": resource_id,
             },
             redis,
@@ -162,7 +162,7 @@ async def _collect(client, settings: Settings, redis, app_id: str, resource_id: 
             # 再次验证官方返回的产品资源、账期和币种，绝不透出其他 Key 的数据。
             if (
                 not isinstance(row, dict)
-                or row.get("Product") != settings.billing_product_code
+                or row.get("Product") != settings.ark_billing_product_code
                 or row.get("SplitItemID") != resource_id
                 or row.get("BillPeriod") != period
                 or row.get("Currency") != "CNY"
@@ -182,7 +182,7 @@ async def _collect(client, settings: Settings, redis, app_id: str, resource_id: 
                 "bill_period": period,
                 "cost_kind": "official_split_bill",
                 "scope": "ark_api_key",
-                "product_code": settings.billing_product_code,
+                "product_code": settings.ark_billing_product_code,
                 "currency": "CNY",
                 "status": "available" if total else "no_data",
                 "record_count": total,
@@ -215,9 +215,9 @@ async def _unlock(redis, token: str) -> None:
 async def official_billing(settings: Settings, caller: CallerIdentity, redis, period: str, *, http_client=None) -> dict:
     product = settings.products.get(caller.app_id)
     if (
-        not settings.billing_enabled
-        or not settings.billing_access_key.get_secret_value().strip()
-        or not settings.billing_secret_key.get_secret_value().strip()
+        not settings.ark_billing_enabled
+        or not settings.ark_billing_access_key.get_secret_value().strip()
+        or not settings.ark_billing_secret_key.get_secret_value().strip()
         or product is None
         or not product.ark_resource_id
     ):
@@ -225,9 +225,9 @@ async def official_billing(settings: Settings, caller: CallerIdentity, redis, pe
     validate_period(period)
     # 凭证账号、产品、资源及账期均参与缓存键。仅缓存白名单汇总，不保存原始账单。
     scope = [
-        settings.billing_access_key.get_secret_value(),
-        settings.billing_region,
-        settings.billing_product_code,
+        settings.ark_billing_access_key.get_secret_value(),
+        settings.ark_billing_region,
+        settings.ark_billing_product_code,
         caller.app_id,
         product.ark_resource_id,
         period,
