@@ -13,7 +13,7 @@ router = APIRouter()
 
 @router.get("/usage")
 async def usage(request: Request, since: datetime | None = None, until: datetime | None = None):
-    """仅供获授 usage:read 的调用方读取自身产品统计，until 为开区间。"""
+    """仅供产品服务密钥调用方读取自身产品统计，until 为开区间。"""
     caller = request.state.image_caller
     settings = request.app.state.settings
     if not settings.usage_enabled:

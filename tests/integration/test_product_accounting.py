@@ -12,23 +12,28 @@ from src.services.usage import UsageStore, ark_estimate
 from tests.contract import test_caller_auth as auth_fixtures
 
 secured = auth_fixtures.secured
-signing_key = auth_fixtures.signing_key
-token = auth_fixtures.token
+FUSION_KEY = auth_fixtures.FUSION_KEY
+VALIDATION_KEY = auth_fixtures.VALIDATION_KEY
 
 
-async def post(client, bearer, **kwargs):
+async def post(client, bearer=FUSION_KEY, **kwargs):
     return await client.post(
         "/v1/generate",
-        headers={"Authorization": "Bearer " + bearer, "X-Image-Scene": "chat_image", "X-Request-ID": "fusion-run-123"},
+        headers={
+            "Authorization": "Bearer " + bearer,
+            "X-Image-User": "user-1",
+            "X-Image-Scene": "chat_image",
+            "X-Request-ID": "fusion-run-123",
+        },
         json={"prompt": "a private cup prompt", "model": "doubao-seedream-5-0-flash", **kwargs},
     )
 
 
-async def test_real_chain_persists_and_reports_without_credentials(client, app, secured, signing_key):
+async def test_real_chain_persists_and_reports_without_credentials(client, app, secured):
     s = app.state.settings
     s.usage_enabled = True
     s.usage_db_path = s.storage_dir + "/usage.sqlite3"
-    bearer = token(signing_key)
+    bearer = FUSION_KEY
     first = await post(client, bearer)
     assert first.status_code == 200, first.text
     second = await post(client, bearer)
@@ -49,6 +54,7 @@ async def test_real_chain_persists_and_reports_without_credentials(client, app, 
             db.execute("SELECT data FROM attempts").fetchall()
         )
     assert request["subject"] == "user-1"
+    assert request["principal_type"] == "user"
     assert request["correlation_id"] == "fusion-run-123"
     assert attempt["credential_alias"] == "fusion"
     for secret in (bearer, "fusion-upstream-secret", "a private cup prompt", "Bearer"):
@@ -56,12 +62,12 @@ async def test_real_chain_persists_and_reports_without_credentials(client, app, 
     assert (await UsageStore(s.usage_db_path).summary("validation"))["requests"] == 0
 
 
-async def test_source_headers_and_scene_cannot_change_billing_product(client, app, secured, signing_key):
+async def test_source_headers_and_scene_cannot_change_billing_product(client, app, secured):
     app.state.settings.usage_enabled = True
     response = await client.post(
         "/v1/generate",
         headers={
-            "Authorization": "Bearer " + token(signing_key),
+            "Authorization": "Bearer " + FUSION_KEY,
             "X-App-ID": "validation",
             "X-Image-Scene": "validation",
         },
@@ -69,12 +75,12 @@ async def test_source_headers_and_scene_cannot_change_billing_product(client, ap
     )
     assert response.status_code == 200
     assert secured.last_request.headers["authorization"] == "Bearer fusion-upstream-secret"
-    report = await client.get("/v1/usage", headers={"Authorization": "Bearer " + token(signing_key)})
+    report = await client.get("/v1/usage", headers={"Authorization": "Bearer " + FUSION_KEY})
     assert report.json()["app_id"] == "fusion"
     assert report.json()["breakdown"][0]["scene"] == "validation"
 
 
-async def test_timeout_attempt_is_recorded_without_retrying_charge(client, app, secured, signing_key):
+async def test_timeout_attempt_is_recorded_without_retrying_charge(client, app, secured):
     app.state.settings.usage_enabled = True
     calls = []
 
@@ -83,36 +89,36 @@ async def test_timeout_attempt_is_recorded_without_retrying_charge(client, app, 
         raise httpx.ReadTimeout("read timeout", request=request)
 
     app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(timeout))
-    response = await post(client, token(signing_key), fallback_model="none")
+    response = await post(client, FUSION_KEY, fallback_model="none")
     assert response.status_code == 504
     assert len(calls) == 1
-    report = await client.get("/v1/usage", headers={"Authorization": "Bearer " + token(signing_key)})
+    report = await client.get("/v1/usage", headers={"Authorization": "Bearer " + FUSION_KEY})
     data = report.json()
     assert data["requests"] == data["errors"] == data["potentially_billable_attempts"] == 1
     assert data["generated_images"] == 0
 
 
-async def test_ledger_start_failure_prevents_paid_request(client, app, secured, signing_key, monkeypatch):
+async def test_ledger_start_failure_prevents_paid_request(client, app, secured, monkeypatch):
     app.state.settings.usage_enabled = True
 
     async def fail(*args, **kwargs):
         raise OSError("disk full")
 
     monkeypatch.setattr(UsageStore, "start_attempt", fail)
-    response = await post(client, token(signing_key))
+    response = await post(client)
     assert response.status_code == 503
     assert response.json()["error"] == "usage_unavailable"
     assert secured.call_count == 0
 
 
-async def test_ledger_update_failure_does_not_resubmit(client, app, secured, signing_key, monkeypatch):
+async def test_ledger_update_failure_does_not_resubmit(client, app, secured, monkeypatch):
     app.state.settings.usage_enabled = True
 
     async def fail(*args, **kwargs):
         raise OSError("disk full")
 
     monkeypatch.setattr(UsageStore, "finish_attempt", fail)
-    response = await post(client, token(signing_key))
+    response = await post(client)
     assert response.status_code == 200
     assert secured.call_count == 1
     s = app.state.settings
@@ -120,30 +126,30 @@ async def test_ledger_update_failure_does_not_resubmit(client, app, secured, sig
     assert report["potentially_billable_attempts"] == 1
 
 
-async def test_hung_final_accounting_does_not_hang_successful_response(client, app, secured, signing_key, monkeypatch):
+async def test_hung_final_accounting_does_not_hang_successful_response(client, app, secured, monkeypatch):
     app.state.settings.usage_enabled = True
 
     async def hang(*args, **kwargs):
         await asyncio.Event().wait()
 
     monkeypatch.setattr(UsageStore, "finish", hang)
-    response = await asyncio.wait_for(post(client, token(signing_key)), 1.5)
+    response = await asyncio.wait_for(post(client), 1.5)
     assert response.status_code == 200
     assert secured.call_count == 1
 
 
-async def test_usage_storage_is_in_health_check(client, app, secured, signing_key):
+async def test_usage_storage_is_in_health_check(client, app, secured):
     app.state.settings.usage_enabled = True
     app.state.settings.usage_db_path = app.state.settings.storage_dir  # 目录不能作为数据库。
     health = await client.get("/v1/health")
     assert health.json()["status"] == "degraded"
     assert "error" in health.json()["checks"]["usage"]
-    response = await post(client, token(signing_key))
+    response = await post(client)
     assert response.status_code == 503
     assert secured.call_count == 0
 
 
-async def test_concurrent_products_do_not_swap_keys(client, app, secured, signing_key):
+async def test_concurrent_products_do_not_swap_keys(client, app, secured):
     seen = {}
 
     async def respond(request):
@@ -155,10 +161,7 @@ async def test_concurrent_products_do_not_swap_keys(client, app, secured, signin
         return httpx.Response(200, json=make_seedream_response())
 
     app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-    a = token(signing_key)
-    b = token(
-        signing_key, app_id="validation", azp="validation-cli", principal_type="service", sub="validation-cli", sid=None
-    )
+    a, b = FUSION_KEY, VALIDATION_KEY
     responses = await asyncio.gather(
         post(client, a, prompt="fusion prompt"), post(client, b, prompt="validation prompt")
     )
@@ -185,19 +188,15 @@ def test_cost_uses_wire_model_pixel_tier_and_reference_count(model, size, refs, 
     assert estimate["estimated_cost_cny"] == expected
 
 
-async def test_mcp_http_uses_request_identity_and_read_only_discovery(
-    client, app, fake_redis, secured, signing_key, monkeypatch
-):
-    # 启用真实 FastMCP HTTP lifespan，保留测试 Redis、JWKS 和假上游。
-    verifier = app.state.identity_verifier
+async def test_mcp_http_uses_request_identity_per_product(client, app, fake_redis, secured, monkeypatch):
+    # 启用真实 FastMCP HTTP lifespan，保留测试 Redis 和假上游。
     monkeypatch.setattr("src.main.aioredis.from_url", lambda *a, **kw: fake_redis)
     headers = {
-        "Authorization": "Bearer " + token(signing_key),
+        "Authorization": "Bearer " + FUSION_KEY,
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": "2025-06-18",
     }
     async with app.router.lifespan_context(app):
-        app.state.identity_verifier = verifier
         response = await client.post(
             "/mcp",
             headers=headers,
@@ -215,7 +214,7 @@ async def test_mcp_http_uses_request_identity_and_read_only_discovery(
         assert "fusion-upstream-secret" not in response.text
         assert "Generated image:" in response.text
         assert secured.last_request.headers["authorization"] == "Bearer fusion-upstream-secret"
-        headers["Authorization"] = "Bearer " + token(signing_key, scopes=["image:read"])
+        headers["Authorization"] = "Bearer " + VALIDATION_KEY
         discovery = await client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         assert discovery.status_code == 200, discovery.text
         assert "generate_image" in discovery.text

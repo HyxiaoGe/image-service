@@ -19,7 +19,7 @@ from src.api.generate import validation_exception_handler
 from src.api.router import v1_router
 from src.config import Settings
 from src.mcp.server import init_mcp, mcp
-from src.middleware.auth import CallerAuthMiddleware, IdentityVerifier
+from src.middleware.auth import CallerAuthMiddleware
 from src.middleware.disconnect import DisconnectMiddleware
 from src.services.cache import CacheService
 from src.services.usage import usage_store
@@ -66,9 +66,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.redis = redis_client
         app.state.cache = cache_service
         app.state.mcp = mcp
-        app.state.identity_verifier = IdentityVerifier(settings)
-        if settings.auth_redis_url:
-            app.state.auth_redis = aioredis.from_url(settings.auth_redis_url, decode_responses=True, socket_timeout=2)
         if settings.usage_enabled:
             path = settings.usage_db_path or str(Path(settings.storage_dir).parent / "usage.sqlite3")
             await usage_store(path, settings.usage_retention_days).ping()
@@ -79,8 +76,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         # Shutdown
         await redis_client.aclose()
-        if settings.auth_redis_url:
-            await app.state.auth_redis.aclose()
 
     app = FastAPI(
         title="Image Service",
